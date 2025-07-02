@@ -82,7 +82,12 @@ def evaluate_horizons(y_true_horizons: np.ndarray, y_pred_horizons: np.ndarray, 
         'mae_avg': np.mean([m['mae'] for m in all_horizon_metrics]),
         'rmse_avg': np.mean([m['rmse'] for m in all_horizon_metrics]),
         'r2_score_avg': np.mean([m['r2_score'] for m in all_horizon_metrics]),
-        'pearson_r_avg': np.mean([m['pearson_r'] for m in all_horizon_metrics])
+        'pearson_r_avg': np.mean([m['pearson_r'] for m in all_horizon_metrics]),
+        # Add detailed metrics by horizon
+        'mae_by_horizon': [m['mae'] for m in all_horizon_metrics],
+        'rmse_by_horizon': [m['rmse'] for m in all_horizon_metrics],
+        'r2_by_horizon': [m['r2_score'] for m in all_horizon_metrics],
+        'pearson_by_horizon': [m['pearson_r'] for m in all_horizon_metrics]
     }
     
     logging.info(f"Average metrics: {avg_metrics}")

@@ -253,8 +253,48 @@ def main():
             val_loss, val_metrics = validate(model, val_loader, loss_fn, device, edge_index, scaler_path, target_scaler_path, rank)
             
             if rank == 0:
+                # 每个epoch都显示基本信息
                 logging.info(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-                logging.info(f"Val Metrics: {val_metrics}")
+                
+                # 每10个epoch或最后一个epoch显示详细指标
+                if (epoch + 1) % 10 == 0 or epoch == args.epochs - 1:
+                    logging.info("="*80)
+                    logging.info(f"DETAILED METRICS - Epoch {epoch+1}/{args.epochs}")
+                    logging.info("="*80)
+                    logging.info(f"Training Loss: {train_loss:.6f}")
+                    logging.info(f"Validation Loss: {val_loss:.6f}")
+                    logging.info("Validation Metrics by Horizon:")
+                    logging.info(f"  - MAE Average: {val_metrics['mae_avg']:.6f}")
+                    logging.info(f"  - RMSE Average: {val_metrics['rmse_avg']:.6f}")
+                    logging.info(f"  - R² Score Average: {val_metrics['r2_score_avg']:.6f}")
+                    logging.info(f"  - Pearson R Average: {val_metrics['pearson_r_avg']:.6f}")
+                    
+                    # 如果val_metrics包含各个horizon的详细指标，也打印出来
+                    if 'mae_by_horizon' in val_metrics:
+                        logging.info("MAE by Horizon:")
+                        for h, mae in enumerate(val_metrics['mae_by_horizon'], 1):
+                            logging.info(f"  Horizon {h:2d}: {mae:.6f}")
+                    
+                    if 'rmse_by_horizon' in val_metrics:
+                        logging.info("RMSE by Horizon:")
+                        for h, rmse in enumerate(val_metrics['rmse_by_horizon'], 1):
+                            logging.info(f"  Horizon {h:2d}: {rmse:.6f}")
+                            
+                    if 'r2_by_horizon' in val_metrics:
+                        logging.info("R² Score by Horizon:")
+                        for h, r2 in enumerate(val_metrics['r2_by_horizon'], 1):
+                            logging.info(f"  Horizon {h:2d}: {r2:.6f}")
+                            
+                    if 'pearson_by_horizon' in val_metrics:
+                        logging.info("Pearson R by Horizon:")
+                        for h, pearson in enumerate(val_metrics['pearson_by_horizon'], 1):
+                            logging.info(f"  Horizon {h:2d}: {pearson:.6f}")
+                    
+                    logging.info(f"Best Validation Loss So Far: {best_val_loss:.6f}")
+                    logging.info("="*80)
+                else:
+                    # 简单显示关键指标
+                    logging.info(f"Val R²: {val_metrics['r2_score_avg']:.4f} | Pearson R: {val_metrics['pearson_r_avg']:.4f}")
                 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -262,7 +302,7 @@ def main():
                     # Save the unwrapped model state for DDP
                     model_to_save = model.module if hasattr(model, 'module') else model
                     torch.save(model_to_save.state_dict(), checkpoint_path)
-                    logging.info(f"New best model saved to {checkpoint_path}")
+                    logging.info(f"🎉 New best model saved to {checkpoint_path} (Val Loss: {val_loss:.6f})")
     
     finally:
         cleanup_distributed()
