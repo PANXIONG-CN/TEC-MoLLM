@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import numpy as np
 import logging
 import os
@@ -16,10 +19,30 @@ from src.evaluation.metrics import evaluate_horizons
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def train_one_epoch(model, dataloader, optimizer, loss_fn, device, edge_index):
+def setup_distributed():
+    """Initialize distributed training"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+        
+        dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
+        torch.cuda.set_device(local_rank)
+        
+        return rank, world_size, local_rank
+    else:
+        return 0, 1, 0
+
+def cleanup_distributed():
+    """Clean up distributed training"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+def train_one_epoch(model, dataloader, optimizer, loss_fn, device, edge_index, rank=0):
     model.train()
     total_loss = 0
-    for batch in tqdm(dataloader, desc="Training"):
+    progress_bar = tqdm(dataloader, desc="Training") if rank == 0 else dataloader
+    for batch in progress_bar:
         optimizer.zero_grad()
         x = batch['x'].to(device)
         y = batch['y'].to(device)
@@ -41,13 +64,14 @@ def train_one_epoch(model, dataloader, optimizer, loss_fn, device, edge_index):
         total_loss += loss.item()
     return total_loss / len(dataloader)
 
-def validate(model, dataloader, loss_fn, device, edge_index, scaler_path, target_scaler_path):
+def validate(model, dataloader, loss_fn, device, edge_index, scaler_path, target_scaler_path, rank=0):
     model.eval()
     total_loss = 0
     all_preds = []
     all_trues = []
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Validating"):
+        progress_bar = tqdm(dataloader, desc="Validating") if rank == 0 else dataloader
+        for batch in progress_bar:
             x = batch['x'].to(device)
             y = batch['y'].to(device)
             time_features = batch['x_time_features'].to(device)
@@ -100,10 +124,15 @@ def parse_args():
 def main():
     args = parse_args()
     
-    # --- Config ---
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logging.info(f"Using device: {device}")
-    logging.info(f"Training configuration: L_in={args.L_in}, L_out={args.L_out}, epochs={args.epochs}")
+    # --- Distributed Setup ---
+    rank, world_size, local_rank = setup_distributed()
+    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    
+    # Only log from rank 0 to avoid duplicate messages
+    if rank == 0:
+        logging.info(f"Using device: {device}")
+        logging.info(f"Distributed training: rank {rank}/{world_size}")
+        logging.info(f"Training configuration: L_in={args.L_in}, L_out={args.L_out}, epochs={args.epochs}")
     
     file_paths = [
         'data/raw/CRIM_SW2hr_AI_v1.2_2014_DataDrivenRange_CN.hdf5',
@@ -151,11 +180,13 @@ def main():
     
     # Use full dataset or subset based on arguments
     if args.use_subset:
-        logging.info(f"Using data subset of size {args.subset_size} for quick testing")
+        if rank == 0:
+            logging.info(f"Using data subset of size {args.subset_size} for quick testing")
         train_data = {k: v[:args.subset_size] for k, v in standardized_data['train'].items()}
         val_data = {k: v[:args.subset_size//2] for k, v in standardized_data['val'].items()}
     else:
-        logging.info("Using full dataset for training")
+        if rank == 0:
+            logging.info("Using full dataset for training")
         train_data = standardized_data['train']
         val_data = standardized_data['val']
     
@@ -171,33 +202,70 @@ def main():
     train_dataset = SlidingWindowSamplerDataset(train_data['X'], train_data['Y'], train_time_features, L_in=args.L_in, L_out=args.L_out)
     val_dataset = SlidingWindowSamplerDataset(val_data['X'], val_data['Y'], val_time_features, L_in=args.L_in, L_out=args.L_out)
     
-    logging.info(f"Training dataset size: {len(train_dataset)} samples")
-    logging.info(f"Validation dataset size: {len(val_dataset)} samples")
+    if rank == 0:
+        logging.info(f"Training dataset size: {len(train_dataset)} samples")
+        logging.info(f"Validation dataset size: {len(val_dataset)} samples")
     
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
+    # Create distributed samplers
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True) if world_size > 1 else None
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
+    
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=(train_sampler is None), 
+        sampler=train_sampler,
+        num_workers=2,
+        pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        sampler=val_sampler,
+        num_workers=2,
+        pin_memory=True
+    )
     
     # --- Model, Optimizer, Loss ---
     model = TEC_MoLLM(model_config).to(device)
+    
+    # Wrap model for distributed training
+    if world_size > 1:
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+    
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
     loss_fn = nn.MSELoss()
     
     # --- Training Loop ---
     best_val_loss = float('inf')
     
-    for epoch in range(args.epochs):
-        logging.info(f"--- Epoch {epoch+1}/{args.epochs} ---")
-        train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, device, edge_index)
-        val_loss, val_metrics = validate(model, val_loader, loss_fn, device, edge_index, scaler_path, target_scaler_path)
-        
-        logging.info(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
-        logging.info(f"Val Metrics: {val_metrics}")
-        
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pth')
-            torch.save(model.state_dict(), checkpoint_path)
-            logging.info(f"New best model saved to {checkpoint_path}")
+    try:
+        for epoch in range(args.epochs):
+            # Set epoch for distributed sampler
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            
+            if rank == 0:
+                logging.info(f"--- Epoch {epoch+1}/{args.epochs} ---")
+            
+            train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, device, edge_index, rank)
+            val_loss, val_metrics = validate(model, val_loader, loss_fn, device, edge_index, scaler_path, target_scaler_path, rank)
+            
+            if rank == 0:
+                logging.info(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+                logging.info(f"Val Metrics: {val_metrics}")
+                
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pth')
+                    # Save the unwrapped model state for DDP
+                    model_to_save = model.module if hasattr(model, 'module') else model
+                    torch.save(model_to_save.state_dict(), checkpoint_path)
+                    logging.info(f"New best model saved to {checkpoint_path}")
+    
+    finally:
+        cleanup_distributed()
 
 if __name__ == '__main__':
     main() 
