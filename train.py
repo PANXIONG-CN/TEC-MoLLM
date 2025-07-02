@@ -105,7 +105,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Train TEC-MoLLM model')
     
     # Data configuration
-    parser.add_argument('--L_in', type=int, default=336, help='Input sequence length (default: 336 as per PRD)')
+    parser.add_argument('--L_in', type=int, default=48, help='Input sequence length (default: 48 for memory efficiency)')
     parser.add_argument('--L_out', type=int, default=12, help='Output sequence length (prediction horizon)')
     parser.add_argument('--use_subset', action='store_true', help='Use small data subset for quick testing')
     parser.add_argument('--subset_size', type=int, default=500, help='Size of data subset for training')
@@ -114,6 +114,8 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--patience', type=int, default=20, help='Early stopping patience (epochs without improvement)')
+    parser.add_argument('--min_delta', type=float, default=1e-4, help='Minimum change to qualify as improvement')
     
     # Model configuration
     parser.add_argument('--d_emb', type=int, default=16, help='Embedding dimension')
@@ -239,6 +241,7 @@ def main():
     
     # --- Training Loop ---
     best_val_loss = float('inf')
+    patience_counter = 0
     
     try:
         for epoch in range(args.epochs):
@@ -296,13 +299,24 @@ def main():
                     # 简单显示关键指标
                     logging.info(f"Val R²: {val_metrics['r2_score_avg']:.4f} | Pearson R: {val_metrics['pearson_r_avg']:.4f}")
                 
-                if val_loss < best_val_loss:
+                # Early stopping and model saving logic
+                if val_loss < best_val_loss - args.min_delta:
                     best_val_loss = val_loss
+                    patience_counter = 0
                     checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pth')
                     # Save the unwrapped model state for DDP
                     model_to_save = model.module if hasattr(model, 'module') else model
                     torch.save(model_to_save.state_dict(), checkpoint_path)
                     logging.info(f"🎉 New best model saved to {checkpoint_path} (Val Loss: {val_loss:.6f})")
+                else:
+                    patience_counter += 1
+                    logging.info(f"No improvement for {patience_counter}/{args.patience} epochs")
+                
+                # Early stopping check
+                if patience_counter >= args.patience:
+                    logging.info(f"🛑 Early stopping triggered after {epoch+1} epochs (patience: {args.patience})")
+                    logging.info(f"Best validation loss: {best_val_loss:.6f}")
+                    break
     
     finally:
         cleanup_distributed()
