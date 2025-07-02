@@ -187,12 +187,17 @@ def main():
     B, H, W, L_out = y_pred_ha.shape
     y_pred_ha_reshaped = y_pred_ha.transpose(0, 3, 1, 2).reshape(B, L_out, H*W, 1)
     
+    # 确保基线预测的样本数与真实值匹配
+    min_samples = min(len(y_true), len(y_pred_ha_reshaped))
+    y_true_matched = y_true[:min_samples]
+    y_pred_ha_matched = y_pred_ha_reshaped[:min_samples]
+    
     # --- 评估指标 ---
     logging.info("评估TEC-MoLLM模型...")
-    results['TEC-MoLLM'] = evaluate_horizons(y_true, y_pred_mollm, args.target_scaler_path)
+    results['TEC-MoLLM'] = evaluate_horizons(y_true_matched, y_pred_mollm[:min_samples], args.target_scaler_path)
     
     logging.info("评估历史平均基线...")
-    results['HistoricalAverage'] = evaluate_horizons(y_true, y_pred_ha_reshaped, args.target_scaler_path)
+    results['HistoricalAverage'] = evaluate_horizons(y_true_matched, y_pred_ha_matched, args.target_scaler_path)
 
     # --- 格式化和保存结果 ---
     results_df = pd.DataFrame(results).T
