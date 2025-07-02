@@ -211,7 +211,7 @@ class SpatioTemporalEmbedding(nn.Module):
         self.d_emb = d_emb
         # Subtask 6.2: Initialize Embedding Layers
         self.node_embedding = nn.Embedding(num_embeddings=num_nodes, embedding_dim=d_emb)
-        self.tod_embedding = nn.Embedding(num_embeddings=24, embedding_dim=d_emb) # 24 hours
+        self.tod_embedding = nn.Embedding(num_embeddings=12, embedding_dim=d_emb) # 12 time slots (2-hour intervals)
         self.doy_embedding = nn.Embedding(num_embeddings=366, embedding_dim=d_emb) # 366 for leap years
         
         logging.info("SpatioTemporalEmbedding module initialized.")

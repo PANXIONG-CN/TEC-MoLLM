@@ -29,7 +29,7 @@ class SlidingWindowSamplerDataset(Dataset):
         
         # The number of samples is determined by how many full windows can be created.
         # For X and time_features: we need L_in consecutive samples for input
-        # For Y: we already have the targets prepared in the right format
+        # For Y: we need to ensure idx + L_in - 1 < len(Y)
         self.num_samples = max(0, len(X) - self.L_in + 1)
         
         # Validate that we have enough data
@@ -37,10 +37,12 @@ class SlidingWindowSamplerDataset(Dataset):
             logging.warning(f"Insufficient data: X length={len(X)}, L_in={L_in}, resulting in {self.num_samples} samples")
             self.num_samples = 0
         
-        # Ensure Y and time_features have sufficient length
-        if len(Y) < self.num_samples:
-            logging.warning(f"Y tensor too short: {len(Y)} < {self.num_samples}, truncating samples")
-            self.num_samples = len(Y)
+        # Ensure Y and time_features have sufficient length for the target indexing
+        # We need idx + L_in - 1 < len(Y), so max_idx = len(Y) - L_in
+        max_samples_from_Y = max(0, len(Y) - self.L_in + 1)
+        if self.num_samples > max_samples_from_Y:
+            logging.warning(f"Y tensor constrains dataset size: reducing from {self.num_samples} to {max_samples_from_Y}")
+            self.num_samples = max_samples_from_Y
             
         if len(time_features) < len(X):
             logging.warning(f"Time features too short: {len(time_features)} < {len(X)}")
@@ -75,9 +77,10 @@ class SlidingWindowSamplerDataset(Dataset):
         x_window = self.X[x_start:x_end]  # Shape: (L_in, H, W, C)
         time_features_window = self.time_features[x_start:x_end]  # Shape: (L_in, 2)
         
-        # For the target, Y[idx] already contains the correct 12-step ahead prediction
-        # that corresponds to the input window ending at idx + L_in - 1
-        target_y = self.Y[idx]  # Shape: (H, W, L_out)
+        # The target `Y` was pre-calculated. `Y[t]` contains the future values for `X[t]`.
+        # Our input window ends at time `t = idx + L_in - 1`.
+        # Therefore, the corresponding target is at this index.
+        target_y = self.Y[idx + self.L_in - 1]  # Shape: (H, W, L_out)
 
         return {
             'x': torch.tensor(x_window, dtype=torch.float32),

@@ -74,15 +74,21 @@ def extract_time_features(time_data: pd.DatetimeIndex) -> np.ndarray:
         time_data (pd.DatetimeIndex): Datetime index array
         
     Returns:
-        np.ndarray: Array of shape (N, 2) containing [hour/24, day_of_year/365]
+        np.ndarray: Array of shape (N, 2) containing [time_of_day_slot, day_of_year]
+                   where time_of_day_slot is 0-11 for 2-hour intervals (0,2,4,...,22 hours)
     """
-    # Normalize hour to [0, 1] and day_of_year to [0, 1]
-    hour_normalized = time_data.hour / 24.0
-    day_of_year_normalized = time_data.dayofyear / 365.0
+    # Convert hour to 2-hour time slot indices (0-11)
+    # Hours 0,2,4,6,8,10,12,14,16,18,20,22 -> slots 0,1,2,3,4,5,6,7,8,9,10,11
+    time_of_day_slot = time_data.hour // 2
+    
+    # Day of year (1-366) -> convert to 0-365 for embedding
+    day_of_year = time_data.dayofyear - 1
     
     # Stack into (N, 2) array
-    time_features = np.stack([hour_normalized, day_of_year_normalized], axis=-1)
+    time_features = np.stack([time_of_day_slot, day_of_year], axis=-1)
     logging.info(f"Extracted time features with shape: {time_features.shape}")
+    logging.info(f"Time slot range: {time_of_day_slot.min()}-{time_of_day_slot.max()}")
+    logging.info(f"Day of year range: {day_of_year.min()}-{day_of_year.max()}")
     
     return time_features
 
