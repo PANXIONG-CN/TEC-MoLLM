@@ -71,6 +71,9 @@ Thumbs.db
 .clinerules/
 .trae/
 .windsurf/
+tests/
+.env.example
+.mcp.json
 
 # GitHub/Agent specific
 AGENTS.md
