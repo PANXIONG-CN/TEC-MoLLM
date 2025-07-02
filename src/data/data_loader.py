@@ -42,7 +42,13 @@ def _load_data_from_hdf5(file_path: str) -> dict:
                     ae = f['space_weather_indices/AE_Index'][:]
                     dst = f['space_weather_indices/Dst_Index'][:]
                     f107 = f['space_weather_indices/F107_Index'][:]
-                    kp = f['space_weather_indices/Kp_Index'][:]
+                    
+                    # Handle Kp Index with proper scale_factor
+                    kp_raw = f['space_weather_indices/Kp_Index'][:]
+                    kp_scale_factor = f['space_weather_indices/Kp_Index'].attrs.get('scale_factor', 1.0)
+                    kp = kp_raw * kp_scale_factor
+                    logging.info(f"Applied scale_factor {kp_scale_factor} to Kp_Index")
+                    
                     ap = f['space_weather_indices/ap_Index'][:]
                     
                     # Stack them into a single array (T, num_indices)

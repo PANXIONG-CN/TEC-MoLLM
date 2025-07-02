@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import logging
 from src.data.data_loader import load_and_split_data
 import joblib
@@ -65,6 +66,26 @@ def construct_target_tensor_Y(tec_data: np.ndarray, horizon: int = 12) -> np.nda
     logging.info(f"Constructed target tensor Y with shape: {target_tensor_Y.shape}")
     return target_tensor_Y
 
+def extract_time_features(time_data: pd.DatetimeIndex) -> np.ndarray:
+    """
+    Extract time features from datetime data.
+    
+    Args:
+        time_data (pd.DatetimeIndex): Datetime index array
+        
+    Returns:
+        np.ndarray: Array of shape (N, 2) containing [hour/24, day_of_year/365]
+    """
+    # Normalize hour to [0, 1] and day_of_year to [0, 1]
+    hour_normalized = time_data.hour / 24.0
+    day_of_year_normalized = time_data.dayofyear / 365.0
+    
+    # Stack into (N, 2) array
+    time_features = np.stack([hour_normalized, day_of_year_normalized], axis=-1)
+    logging.info(f"Extracted time features with shape: {time_features.shape}")
+    
+    return time_features
+
 def create_features_and_targets(file_paths: list, horizon: int = 12) -> dict:
     """
     Main function to perform feature and target engineering for a given data split.
@@ -81,10 +102,22 @@ def create_features_and_targets(file_paths: list, horizon: int = 12) -> dict:
         broadcasted = broadcast_indices(scaled_indices, data['tec'].shape[1:])
         feature_tensor_X = construct_feature_tensor_X(data['tec'], broadcasted)
         target_tensor_Y = construct_target_tensor_Y(data['tec'], horizon)
+        
+        # Extract real time features from datetime data
+        time_features = extract_time_features(data['time'])
+        
         num_targets = target_tensor_Y.shape[0]
         aligned_X = feature_tensor_X[:num_targets]
+        aligned_time_features = time_features[:num_targets]
+        
         logging.info(f"Aligned X shape: {aligned_X.shape}, Aligned Y shape: {target_tensor_Y.shape}")
-        processed_splits[split_name] = {'X': aligned_X, 'Y': target_tensor_Y}
+        logging.info(f"Aligned time features shape: {aligned_time_features.shape}")
+        
+        processed_splits[split_name] = {
+            'X': aligned_X, 
+            'Y': target_tensor_Y,
+            'time_features': aligned_time_features
+        }
     logging.info("Feature and target engineering completed.")
     return processed_splits
 

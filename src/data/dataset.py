@@ -28,9 +28,27 @@ class SlidingWindowSamplerDataset(Dataset):
         self.L_out = L_out
         
         # The number of samples is determined by how many full windows can be created.
-        self.num_samples = len(X) - self.L_in - self.L_out + 1
+        # For X and time_features: we need L_in consecutive samples for input
+        # For Y: we already have the targets prepared in the right format
+        self.num_samples = max(0, len(X) - self.L_in + 1)
         
-        logging.info(f"Dataset initialized. Number of samples: {self.num_samples}")
+        # Validate that we have enough data
+        if self.num_samples <= 0:
+            logging.warning(f"Insufficient data: X length={len(X)}, L_in={L_in}, resulting in {self.num_samples} samples")
+            self.num_samples = 0
+        
+        # Ensure Y and time_features have sufficient length
+        if len(Y) < self.num_samples:
+            logging.warning(f"Y tensor too short: {len(Y)} < {self.num_samples}, truncating samples")
+            self.num_samples = len(Y)
+            
+        if len(time_features) < len(X):
+            logging.warning(f"Time features too short: {len(time_features)} < {len(X)}")
+            self.num_samples = 0
+        
+        logging.info(f"Dataset initialized. Available data: X={len(X)}, Y={len(Y)}, time_features={len(time_features)}")
+        logging.info(f"Window config: L_in={L_in}, L_out={L_out}")
+        logging.info(f"Final dataset samples: {self.num_samples}")
 
     def __len__(self) -> int:
         """Returns the total number of samples in the dataset."""
@@ -46,27 +64,20 @@ class SlidingWindowSamplerDataset(Dataset):
         Returns:
             dict: A dictionary containing the input window, target window, and time features.
         """
-        if idx >= self.num_samples:
-            raise IndexError("Index out of bounds")
+        if idx >= self.num_samples or self.num_samples <= 0:
+            raise IndexError(f"Index {idx} out of bounds for dataset with {self.num_samples} samples")
 
         # Determine the slice for the input window
         x_start = idx
         x_end = idx + self.L_in
         
-        # The target window starts right after the input window
-        y_start = x_end
-        y_end = y_start + self.L_out
-        
         # Slice the data arrays
-        x_window = self.X[x_start:x_end]
-        y_window = self.Y[y_start:y_end] # This is a window of future targets
-        time_features_window = self.time_features[x_start:x_end]
+        x_window = self.X[x_start:x_end]  # Shape: (L_in, H, W, C)
+        time_features_window = self.time_features[x_start:x_end]  # Shape: (L_in, 2)
         
-        # For the target, we need a single target that corresponds to the input window.
-        # This will be the Y value at the START of the prediction window.
-        # The shape of Y is (N, H, W, L_out), so Y[t] already contains the 12 future steps.
-        # Therefore, we take the target corresponding to the END of the input window.
-        target_y = self.Y[x_end - 1] 
+        # For the target, Y[idx] already contains the correct 12-step ahead prediction
+        # that corresponds to the input window ending at idx + L_in - 1
+        target_y = self.Y[idx]  # Shape: (H, W, L_out)
 
         return {
             'x': torch.tensor(x_window, dtype=torch.float32),
