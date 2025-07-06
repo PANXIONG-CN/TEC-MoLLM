@@ -19,6 +19,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+find_lr.py
 
 # Virtual environments
 .env
@@ -48,7 +49,6 @@ venv.bak/
 checkpoints/
 results/
 logs/
-*.log
 
 # Data files (optional - comment out if you want to track data)
 data/raw/*.hdf5
