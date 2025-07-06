@@ -254,12 +254,17 @@ def main():
     model = TEC_MoLLM(model_config).to(device)
     
     # --- Performance Optimizations ---
-    # 1. Compile the model for maximum performance (must be done after moving to device)
-    if rank == 0:
-        logging.info("Compiling the model with torch.compile()...")
-    model = torch.compile(model)
-    if rank == 0:
-        logging.info("Model compiled successfully.")
+    # --- START MODIFICATION 1.1.1 ---
+    # REMOVED: torch.compile() due to compatibility issues with transformers 4.41+
+    # REASON: This call fails with "torch.compiler has no attribute 'is_compiling'"
+    #         and falls back to eager mode, adding overhead without performance gains.
+    #         Disabling it simplifies debugging and ensures stable execution.
+    # if rank == 0:
+    #     logging.info("Compiling the model with torch.compile()...")
+    # model = torch.compile(model)
+    # if rank == 0:
+    #     logging.info("Model compiled successfully.")
+    # --- END MODIFICATION 1.1.1 ---
 
     # 2. Initialize Gradient Scaler for mixed-precision training
     scaler = torch.cuda.amp.GradScaler()
@@ -270,6 +275,13 @@ def main():
     
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
     loss_fn = nn.MSELoss()
+
+    # --- START MODIFICATION 1.3.1 ---
+    # REASON: Adds dynamic learning rate adjustment, which helps stabilize training
+    #         and allows for better convergence in later epochs. CosineAnnealingLR
+    #         is a robust choice for many deep learning tasks.
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
+    # --- END MODIFICATION 1.3.1 ---
     
     # --- Training Loop ---
     best_val_loss = float('inf')
@@ -286,6 +298,13 @@ def main():
             
             train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, device, edge_index, scaler, rank, args.accumulation_steps)
             val_loss, val_metrics = validate(model, val_loader, loss_fn, device, edge_index, target_scaler_path, rank)
+            
+            # --- START MODIFICATION 1.3.2 ---
+            # Step the scheduler after each epoch
+            scheduler.step()
+            if rank == 0:
+                logging.info(f"LR scheduler stepped. New LR: {scheduler.get_last_lr()[0]:.2e}")
+            # --- END MODIFICATION 1.3.2 ---
             
             if rank == 0:
                 # 每个epoch都显示基本信息

@@ -44,16 +44,23 @@ def evaluate_metrics(y_true_scaled: np.ndarray, y_pred_scaled: np.ndarray, scale
     rmse = np.sqrt(mean_squared_error(y_true_unscaled, y_pred_unscaled))
     r2 = r2_score(y_true_unscaled, y_pred_unscaled)
     
-    # Pearson R needs to be calculated for each feature/horizon and then averaged
-    # Handle case where predictions or true values are constant
-    pearson_coeffs = []
-    for i in range(y_true_unscaled.shape[1]):
-        if np.std(y_true_unscaled[:, i]) > 0 and np.std(y_pred_unscaled[:, i]) > 0:
-            pearson_coeffs.append(pearsonr(y_true_unscaled[:, i], y_pred_unscaled[:, i])[0])
-        else:
-            pearson_coeffs.append(0.0) # Or np.nan, depending on desired handling
-    
-    avg_pearson_r = np.mean(pearson_coeffs)
+    # --- START MODIFICATION 1.4.1 ---
+    # REASON: The original Pearson R calculation was flawed for single-feature predictions.
+    #         This version correctly calculates it on the flattened data arrays.
+    # OLD Pearson R block:
+    # pearson_coeffs = []
+    # for i in range(y_true_unscaled.shape[1]): ...
+    # avg_pearson_r = np.mean(pearson_coeffs)
+
+    # NEW Pearson R calculation:
+    # Ensure arrays are 1D for pearsonr
+    y_true_flat = y_true_unscaled.ravel()
+    y_pred_flat = y_pred_unscaled.ravel()
+    if np.std(y_true_flat) > 0 and np.std(y_pred_flat) > 0:
+        avg_pearson_r = pearsonr(y_true_flat, y_pred_flat)[0]
+    else:
+        avg_pearson_r = 0.0
+    # --- END MODIFICATION 1.4.1 ---
 
 
     metrics = {
@@ -106,6 +113,19 @@ def evaluate_horizons(y_true_horizons_scaled: np.ndarray, y_pred_horizons_scaled
         dict: A dictionary of average metrics across all horizons.
     """
     logging.info("Evaluating metrics across all horizons...")
+
+    # --- START MODIFICATION 1.4.2 ---
+    # REASON: Adds a defensive check to handle non-finite values (inf/nan) that
+    #         were causing the 'overflow' warning. This prevents crashes and
+    #         provides clear logging when numerical instability occurs.
+    if not np.all(np.isfinite(y_pred_horizons_scaled)):
+        num_non_finite = np.sum(~np.isfinite(y_pred_horizons_scaled))
+        logging.warning(
+            f"Overflow Guard: Found {num_non_finite} non-finite values in predictions. "
+            "Clamping them to 0 for metric calculation."
+        )
+        y_pred_horizons_scaled = np.nan_to_num(y_pred_horizons_scaled, nan=0.0, posinf=0.0, neginf=0.0)
+    # --- END MODIFICATION 1.4.2 ---
 
     # Load scaler if provided
     if target_scaler_path:

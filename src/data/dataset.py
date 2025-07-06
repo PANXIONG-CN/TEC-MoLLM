@@ -42,7 +42,13 @@ class SlidingWindowSamplerDataset(Dataset):
         
         # The number of samples is determined by how many full windows can be created.
         # Since data is pre-aligned, the logic is simplified.
-        self.num_samples = max(0, len(self.X) - self.L_in + 1)
+        # --- START MODIFICATION 1.2.1 ---
+        # REASON: The original calculation did not account for the output window length (L_out),
+        #         leading to index errors or using incomplete targets at the end of the dataset.
+        # OLD: self.num_samples = max(0, len(self.X) - self.L_in + 1)
+        # NEW:
+        self.num_samples = max(0, len(self.X) - self.L_in - self.L_out + 1)
+        # --- END MODIFICATION 1.2.1 ---
         
         if self.num_samples <= 0:
             logging.warning(f"Insufficient data for windowing: Total length={len(self.X)}, L_in={self.L_in}. Resulting samples: {self.num_samples}")
