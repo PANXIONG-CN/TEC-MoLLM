@@ -7,34 +7,54 @@ from scipy.stats import pearsonr
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def evaluate_metrics(y_true: np.ndarray, y_pred: np.ndarray, scaler: joblib.memory.MemorizedResult) -> dict:
+def evaluate_metrics(y_true_scaled: np.ndarray, y_pred_scaled: np.ndarray, scaler) -> dict:
     """
-    Calculates multiple evaluation metrics after inverse transforming the data.
+    Calculates multiple evaluation metrics by first applying inverse transform to scaled data.
     
     Args:
-        y_true (np.ndarray): The ground truth values, scaled.
-        y_pred (np.ndarray): The predicted values, scaled.
-        scaler (joblib.memory.MemorizedResult): The fitted scaler object.
+        y_true_scaled (np.ndarray): The ground truth values, scaled.
+        y_pred_scaled (np.ndarray): The predicted values, scaled.
+        scaler: The fitted scaler for inverse transformation.
         
     Returns:
         dict: A dictionary of calculated metrics.
     """
-    if y_true.ndim > 2: # Reshape if data is in (B, L, N, C) format
-        y_true = y_true.reshape(-1, y_true.shape[-1])
-        y_pred = y_pred.reshape(-1, y_pred.shape[-1])
+    # 在计算指标前，先进行逆变换
+    original_true_shape = y_true_scaled.shape
+    original_pred_shape = y_pred_scaled.shape
+    
+    # Reshape for scaler (expects 2D input)
+    y_true_reshaped = y_true_scaled.reshape(-1, 1)
+    y_pred_reshaped = y_pred_scaled.reshape(-1, 1)
+    
+    # Apply inverse transform
+    y_true_unscaled_reshaped = scaler.inverse_transform(y_true_reshaped)
+    y_pred_unscaled_reshaped = scaler.inverse_transform(y_pred_reshaped)
+    
+    # Reshape back to original dimensions
+    y_true_unscaled = y_true_unscaled_reshaped.reshape(original_true_shape)
+    y_pred_unscaled = y_pred_unscaled_reshaped.reshape(original_pred_shape)
 
-    # Inverse transform to get original scale
-    y_true_unscaled = scaler.inverse_transform(y_true)
-    y_pred_unscaled = scaler.inverse_transform(y_pred)
+    if y_true_unscaled.ndim > 2: # Reshape if data is in (B, L, N, C) format
+        y_true_unscaled = y_true_unscaled.reshape(-1, y_true_unscaled.shape[-1])
+        y_pred_unscaled = y_pred_unscaled.reshape(-1, y_pred_unscaled.shape[-1])
 
-    # Subtask 12.1: Core metric functions
+    # 后续所有计算都在unscaled值上进行
     mae = mean_absolute_error(y_true_unscaled, y_pred_unscaled)
     rmse = np.sqrt(mean_squared_error(y_true_unscaled, y_pred_unscaled))
     r2 = r2_score(y_true_unscaled, y_pred_unscaled)
     
     # Pearson R needs to be calculated for each feature/horizon and then averaged
-    pearson_coeffs = [pearsonr(y_true_unscaled[:, i], y_pred_unscaled[:, i])[0] for i in range(y_true_unscaled.shape[1])]
+    # Handle case where predictions or true values are constant
+    pearson_coeffs = []
+    for i in range(y_true_unscaled.shape[1]):
+        if np.std(y_true_unscaled[:, i]) > 0 and np.std(y_pred_unscaled[:, i]) > 0:
+            pearson_coeffs.append(pearsonr(y_true_unscaled[:, i], y_pred_unscaled[:, i])[0])
+        else:
+            pearson_coeffs.append(0.0) # Or np.nan, depending on desired handling
+    
     avg_pearson_r = np.mean(pearson_coeffs)
+
 
     metrics = {
         'mae': mae,
@@ -45,39 +65,72 @@ def evaluate_metrics(y_true: np.ndarray, y_pred: np.ndarray, scaler: joblib.memo
     
     return metrics
 
-def evaluate_horizons(y_true_horizons: np.ndarray, y_pred_horizons: np.ndarray, scaler_path: str) -> dict:
+def evaluate_metrics_unscaled_fallback(y_true_unscaled: np.ndarray, y_pred_unscaled: np.ndarray) -> dict:
     """
-    Evaluates metrics across multiple prediction horizons.
+    Fallback function for calculating metrics on already unscaled data (backward compatibility).
+    """
+    if y_true_unscaled.ndim > 2:
+        y_true_unscaled = y_true_unscaled.reshape(-1, y_true_unscaled.shape[-1])
+        y_pred_unscaled = y_pred_unscaled.reshape(-1, y_pred_unscaled.shape[-1])
+
+    mae = mean_absolute_error(y_true_unscaled, y_pred_unscaled)
+    rmse = np.sqrt(mean_squared_error(y_true_unscaled, y_pred_unscaled))
+    r2 = r2_score(y_true_unscaled, y_pred_unscaled)
+    
+    pearson_coeffs = []
+    for i in range(y_true_unscaled.shape[1]):
+        if np.std(y_true_unscaled[:, i]) > 0 and np.std(y_pred_unscaled[:, i]) > 0:
+            pearson_coeffs.append(pearsonr(y_true_unscaled[:, i], y_pred_unscaled[:, i])[0])
+        else:
+            pearson_coeffs.append(0.0)
+    
+    avg_pearson_r = np.mean(pearson_coeffs)
+    
+    return {
+        'mae': mae,
+        'rmse': rmse,
+        'r2_score': r2,
+        'pearson_r': avg_pearson_r
+    }
+
+def evaluate_horizons(y_true_horizons_scaled: np.ndarray, y_pred_horizons_scaled: np.ndarray, target_scaler_path: str = None) -> dict:
+    """
+    Evaluates metrics across multiple prediction horizons by first applying inverse transform.
     
     Args:
-        y_true_horizons (np.ndarray): Ground truth of shape (N, L_out, ...).
-        y_pred_horizons (np.ndarray): Predictions of shape (N, L_out, ...).
-        scaler_path (str): Path to the saved scaler object.
+        y_true_horizons_scaled (np.ndarray): Ground truth of shape (N, L_out, ...), scaled.
+        y_pred_horizons_scaled (np.ndarray): Predictions of shape (N, L_out, ...), scaled.
+        target_scaler_path (str): Path to the target scaler for inverse transformation.
         
     Returns:
         dict: A dictionary of average metrics across all horizons.
     """
     logging.info("Evaluating metrics across all horizons...")
-    # Subtask 12.2: Load scaler
-    try:
-        scaler = joblib.load(scaler_path)
-    except FileNotFoundError:
-        logging.error(f"Scaler file not found at {scaler_path}")
-        return {}
+
+    # Load scaler if provided
+    if target_scaler_path:
+        scaler = joblib.load(target_scaler_path)
+        logging.info(f"Loaded target scaler from {target_scaler_path}")
+    else:
+        logging.warning("No target_scaler_path provided, assuming data is already unscaled")
+        scaler = None
 
     all_horizon_metrics = []
-    num_horizons = y_true_horizons.shape[1]
+    num_horizons = y_true_horizons_scaled.shape[1]
 
-    # Subtask 12.4: Adapt for multiple horizons
     for i in range(num_horizons):
-        y_true_h = y_true_horizons[:, i]
-        y_pred_h = y_pred_horizons[:, i]
+        y_true_h = y_true_horizons_scaled[:, i]
+        y_pred_h = y_pred_horizons_scaled[:, i]
         
-        # Subtask 12.3: Use the wrapper for a single horizon
-        horizon_metrics = evaluate_metrics(y_true_h, y_pred_h, scaler)
+        # Use the wrapper for a single horizon, passing scaler
+        if scaler is not None:
+            horizon_metrics = evaluate_metrics(y_true_h, y_pred_h, scaler)
+        else:
+            # Fallback to old behavior if no scaler provided (for backward compatibility)
+            horizon_metrics = evaluate_metrics_unscaled_fallback(y_true_h, y_pred_h)
         all_horizon_metrics.append(horizon_metrics)
         
-    # Subtask 12.5: Calculate and report average metrics
+    # Calculate and report average metrics
     avg_metrics = {
         'mae_avg': np.mean([m['mae'] for m in all_horizon_metrics]),
         'rmse_avg': np.mean([m['rmse'] for m in all_horizon_metrics]),

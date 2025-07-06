@@ -268,6 +268,11 @@ class PredictionHead(nn.Module):
         """
         super().__init__()
         self.fc = nn.Linear(input_dim, output_dim)
+        # --- START MODIFICATION 1.1.1 ---
+        # REMOVED: self.activation = nn.ReLU() 
+        # REASON: The model must predict standardized values which can be negative.
+        #         ReLU introduces a positive bias, crippling regression performance.
+        # --- END MODIFICATION 1.1.1 ---
         logging.info(f"PredictionHead initialized with input_dim={input_dim}, output_dim={output_dim}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -284,9 +289,13 @@ class PredictionHead(nn.Module):
         batch_size = x.shape[0]
         x = x.view(batch_size, -1)
         
-        # Apply the final linear layer
         output = self.fc(x)
-        return output 
+        
+        # --- START MODIFICATION 1.1.2 ---
+        # REMOVED: output = self.activation(output)
+        # --- END MODIFICATION 1.1.2 ---
+        
+        return output
 
 class SpatialEncoder(nn.Module):
     """

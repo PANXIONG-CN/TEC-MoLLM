@@ -10,7 +10,6 @@ import joblib
 from sklearn.preprocessing import StandardScaler
 
 from src.data.dataset import SlidingWindowSamplerDataset
-from src.features.feature_engineering import create_features_and_targets, standardize_features
 from src.model.tec_mollm import TEC_MoLLM
 from src.evaluation.metrics import evaluate_horizons
 
@@ -44,33 +43,30 @@ def get_tec_mollm_predictions(model, dataloader, device, edge_index):
     
     return np.concatenate(all_trues, axis=0), np.concatenate(all_preds, axis=0)
 
-def get_baseline_predictions(test_data, L_in, L_out):
+def get_baseline_predictions(test_dataset, L_in, L_out):
     """生成简单的基线预测"""
     logging.info("生成历史平均基线预测...")
     
-    # 获取测试数据形状
-    B, H, W, features = test_data['X'].shape
-    
-    # 简单的历史平均：使用输入序列最后一个时间步的平均值作为所有未来预测
-    # 这里我们需要创建滑动窗口样本来匹配数据格式
     predictions = []
     
-    # 遍历可能的滑动窗口
-    for i in range(len(test_data['X']) - L_in - L_out + 1):
-        # 取输入序列的历史数据 (L_in, H, W, features)
-        input_seq = test_data['X'][i:i+L_in]
+    # 遍历测试数据集样本
+    for i in range(len(test_dataset)):
+        sample = test_dataset[i]
+        x_window = sample['x'].numpy()  # (L_in, H, W, C)
         
         # 计算历史平均值 (对时间维度求平均)
         # 只使用TEC特征（第0个特征）进行预测
-        historical_avg = np.mean(input_seq[:, :, :, 0:1], axis=0, keepdims=True)  # (1, H, W, 1)
+        historical_avg = np.mean(x_window[:, :, :, 0:1], axis=0, keepdims=True)  # (1, H, W, 1)
         
         # 重复L_out次作为未来预测
         pred = np.repeat(historical_avg, L_out, axis=0)  # (L_out, H, W, 1)
-        predictions.append(pred)
+        
+        # 转换为期望的格式 (H, W, L_out)
+        pred_reshaped = pred.transpose(1, 2, 0, 3).squeeze(-1)  # (H, W, L_out)
+        predictions.append(pred_reshaped)
     
-    # 转换为与目标相同的格式 (num_samples, H, W, L_out)
-    predictions = np.array(predictions)  # (num_samples, L_out, H, W, 1)
-    predictions = predictions.transpose(0, 2, 3, 1, 4).squeeze(-1)  # (num_samples, H, W, L_out)
+    # 转换为最终格式 (num_samples, H, W, L_out)
+    predictions = np.array(predictions)
     
     return predictions
 
@@ -81,17 +77,12 @@ def parse_args():
     # 数据配置
     parser.add_argument('--L_in', type=int, default=48, help='输入序列长度')
     parser.add_argument('--L_out', type=int, default=12, help='输出序列长度')
-    parser.add_argument('--data_files', nargs='+', default=[
-        'data/raw/CRIM_SW2hr_AI_v1.2_2014_DataDrivenRange_CN.hdf5',
-        'data/raw/CRIM_SW2hr_AI_v1.2_2015_DataDrivenRange_CN.hdf5'
-    ])
     
     # 模型配置
     parser.add_argument('--d_emb', type=int, default=16, help='嵌入维度')
     parser.add_argument('--llm_layers', type=int, default=3, help='LLM层数')
     
     # 文件路径
-    parser.add_argument('--scaler_path', type=str, default='data/processed/scaler.joblib')
     parser.add_argument('--target_scaler_path', type=str, default='data/processed/target_scaler.joblib')
     parser.add_argument('--graph_path', type=str, default='data/processed/graph_A.pt')
     parser.add_argument('--model_checkpoint', type=str, default='checkpoints/best_model.pth')
@@ -107,28 +98,18 @@ def main():
     logging.info(f"使用设备: {device}")
     logging.info(f"测试配置: L_in={args.L_in}, L_out={args.L_out}")
     
-    # --- 加载和预处理数据 ---
-    logging.info("加载和预处理数据...")
-    processed_data = create_features_and_targets(args.data_files)
-    standardized_data, _ = standardize_features(processed_data, scaler_path=args.scaler_path)
-    
-    # 创建目标数据的独立缩放器（如果不存在）
+    # --- 验证预处理数据文件存在 ---
+    data_dir = 'data/processed'
     if not os.path.exists(args.target_scaler_path):
-        logging.info("创建目标数据缩放器...")
-        target_scaler = StandardScaler()
-        train_tec_data = processed_data['train']['X'][:, :, :, 0:1]
-        train_tec_reshaped = train_tec_data.reshape(-1, 1)
-        target_scaler.fit(train_tec_reshaped)
-        joblib.dump(target_scaler, args.target_scaler_path)
+        logging.error(f"Target scaler not found at {args.target_scaler_path}. Please run preprocessing script first.")
+        return
     
-    # 使用真实的时间特征
-    test_time_features = processed_data['test']['time_features']
+    logging.info("加载预处理好的测试数据...")
     
-    # 创建测试数据集
+    # 创建测试数据集（使用预处理好的数据）
     test_dataset = SlidingWindowSamplerDataset(
-        standardized_data['test']['X'], 
-        standardized_data['test']['Y'], 
-        test_time_features, 
+        data_path=data_dir, 
+        mode='test',
         L_in=args.L_in, 
         L_out=args.L_out
     )
@@ -162,16 +143,23 @@ def main():
     logging.info("加载TEC-MoLLM模型...")
     model = TEC_MoLLM(model_config).to(device)
     
-    # 加载模型权重（处理DDP保存的模型）
+    # 加载模型权重（处理DDP和torch.compile保存的模型）
     checkpoint = torch.load(args.model_checkpoint, map_location=device)
-    if isinstance(checkpoint, dict) and 'module.' in list(checkpoint.keys())[0]:
-        # 如果是DDP保存的模型，去除'module.'前缀
-        new_checkpoint = {}
-        for k, v in checkpoint.items():
-            new_checkpoint[k.replace('module.', '')] = v
-        checkpoint = new_checkpoint
     
-    model.load_state_dict(checkpoint)
+    # 创建一个新的state_dict来存储修复后的键
+    new_state_dict = {}
+    for k, v in checkpoint.items():
+        # 移除 'module.' 前缀 (来自DDP)
+        if k.startswith('module.'):
+            k = k[len('module.'):]
+        # 移除 '_orig_mod.' 前缀 (来自torch.compile)
+        if k.startswith('_orig_mod.'):
+            k = k[len('_orig_mod.'):]
+        new_state_dict[k] = v
+    
+    # 使用修复后的state_dict加载模型
+    model.load_state_dict(new_state_dict)
+    
     edge_index = torch.load(args.graph_path)['edge_index'].to(device)
     
     logging.info("获取TEC-MoLLM预测结果...")
@@ -179,7 +167,7 @@ def main():
     
     # 基线预测
     logging.info("生成基线预测...")
-    y_pred_ha = get_baseline_predictions(standardized_data['test'], args.L_in, args.L_out)
+    y_pred_ha = get_baseline_predictions(test_dataset, args.L_in, args.L_out)
     
     # 需要将基线预测重塑为与y_true相同的格式
     # y_true: (num_samples, L_out, H*W, 1)
