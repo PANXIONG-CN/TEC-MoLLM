@@ -109,11 +109,15 @@ def validate(model, dataloader, loss_fn, device, edge_index, target_scaler_path,
             if time_features.numel() > 0:
                 time_features = time_features.unsqueeze(-2).expand(B, L, H * W, -1)
             
-            # Use autocast in validation for consistency
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                output = model(x, time_features, edge_index)
-                y_reshaped = y.permute(0, 3, 1, 2).reshape(B, -1, H * W, 1)
-                loss = loss_fn(output, y_reshaped)
+            # --- START MODIFICATION 1.1.1 ---
+            # REASON: 使用 float32 进行验证对数值稳定性至关重要。
+            #         float16 的范围太小，无法处理逆变换后的值，
+            #         这是导致 'overflow' 警告的根本原因。
+            # REMOVED: with torch.autocast(device_type='cuda', dtype=torch.float16):
+            output = model(x, time_features, edge_index)
+            y_reshaped = y.permute(0, 3, 1, 2).reshape(B, -1, H * W, 1)
+            loss = loss_fn(output, y_reshaped)
+            # --- END MODIFICATION 1.1.1 ---
             
             total_loss += loss.item()
             
@@ -274,13 +278,19 @@ def main():
         model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
     
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
-    loss_fn = nn.MSELoss()
+    # --- START MODIFICATION 1.2.1 ---
+    # REASON: HuberLoss 对异常值不敏感，比 MSELoss 更稳定，有助于缓解数值问题。
+    # OLD: loss_fn = nn.MSELoss()
+    # NEW:
+    loss_fn = nn.HuberLoss(delta=1.0)
+    # --- END MODIFICATION 1.2.1 ---
 
     # --- START MODIFICATION 1.3.1 ---
-    # REASON: Adds dynamic learning rate adjustment, which helps stabilize training
-    #         and allows for better convergence in later epochs. CosineAnnealingLR
-    #         is a robust choice for many deep learning tasks.
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
+    # REASON: ReduceLROnPlateau 提供基于验证性能的自适应学习率调整，
+    #         比固定的余弦调度更加鲁棒。
+    # OLD: scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
+    # NEW:
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, min_lr=1e-7)
     # --- END MODIFICATION 1.3.1 ---
     
     # --- Training Loop ---
@@ -300,10 +310,11 @@ def main():
             val_loss, val_metrics = validate(model, val_loader, loss_fn, device, edge_index, target_scaler_path, rank)
             
             # --- START MODIFICATION 1.3.2 ---
-            # Step the scheduler after each epoch
-            scheduler.step()
+            # 使用验证损失来驱动调度器
+            scheduler.step(val_loss)
             if rank == 0:
-                logging.info(f"LR scheduler stepped. New LR: {scheduler.get_last_lr()[0]:.2e}")
+                # 注意：ReduceLROnPlateau 的 get_last_lr() 显示的是当前优化器的学习率
+                logging.info(f"LR scheduler checked. Current LR: {optimizer.param_groups[0]['lr']:.2e}")
             # --- END MODIFICATION 1.3.2 ---
             
             if rank == 0:

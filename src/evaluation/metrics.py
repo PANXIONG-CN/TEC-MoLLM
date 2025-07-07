@@ -35,6 +35,13 @@ def evaluate_metrics(y_true_scaled: np.ndarray, y_pred_scaled: np.ndarray, scale
     y_true_unscaled = y_true_unscaled_reshaped.reshape(original_true_shape)
     y_pred_unscaled = y_pred_unscaled_reshaped.reshape(original_pred_shape)
 
+    # --- START MODIFICATION 1.6.1 (Re-added for ultimate stability) ---
+    # REASON: 添加最终防护措施以防止任何可能的数值问题，
+    #         通过确保所有预测值都在 TEC 的物理合理范围内。
+    TEC_MIN, TEC_MAX = 0, 200  # 定义 TEC 的物理边界值（单位：TECU）
+    y_pred_unscaled = np.clip(y_pred_unscaled, TEC_MIN, TEC_MAX)
+    # --- END MODIFICATION 1.6.1 ---
+
     if y_true_unscaled.ndim > 2: # Reshape if data is in (B, L, N, C) format
         y_true_unscaled = y_true_unscaled.reshape(-1, y_true_unscaled.shape[-1])
         y_pred_unscaled = y_pred_unscaled.reshape(-1, y_pred_unscaled.shape[-1])

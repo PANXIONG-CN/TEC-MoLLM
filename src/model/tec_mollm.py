@@ -89,6 +89,11 @@ class TEC_MoLLM(nn.Module):
         attention_mask = torch.ones(x_temporal.shape[:-1], device=x.device, dtype=torch.long)
         x_llm = self.llm_backbone(inputs_embeds=x_temporal, attention_mask=attention_mask)
         
+        # --- START MODIFICATION 1.5.1 ---
+        # REASON: 添加正则化以防止过拟合并改善泛化能力。
+        x_llm = torch.nn.functional.dropout(x_llm, p=0.1, training=self.training)
+        # --- END MODIFICATION 1.5.1 ---
+        
         # 5. PredictionHead
         predictions = self.prediction_head(x_llm) # Output: (B*N, L_out)
         

@@ -168,13 +168,16 @@ class LLMBackbone(nn.Module):
 
         # Subtask 9.3: Define and apply LoRA config
         logging.info("Defining LoRA configuration...")
+        # --- START MODIFICATION 1.4.1 ---
+        # REASON: 增加 LoRA rank 提升模型容量以学习更复杂的模式。
         lora_config = LoraConfig(
-            r=16,
-            lora_alpha=32,
+            r=32,             # OLD: 16
+            lora_alpha=64,    # OLD: 32
             target_modules=["c_attn"], # For GPT-2, attention weights are in 'c_attn'
             lora_dropout=0.1,
             bias="none"
         )
+        # --- END MODIFICATION 1.4.1 ---
         logging.info("Applying LoRA to the model...")
         self.model = get_peft_model(self.model, lora_config)
         logging.info("LoRA applied successfully.")
