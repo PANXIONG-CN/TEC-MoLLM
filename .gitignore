@@ -21,15 +21,6 @@ wheels/
 *.egg
 find_lr.py
 
-# Virtual environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
 # IDE and editors
 .idea/
 .vscode/
@@ -64,57 +55,9 @@ data/processed/*.joblib
 ehthumbs.db
 Thumbs.db
 
-# Task Master files
-.taskmaster/
-.claude/
-.roomodes
-.clinerules/
-.trae/
-.windsurf/
-tests/
-.env.example
-.mcp.json
-
 # Project specific
 TEC-MoLLM-PRD.md
 experiments/
 plans/
 validation_run_v1.2.log
 # training_run_v3.1.log
-
-# GitHub/Agent specific
-AGENTS.md
-CLAUDE.md
-
-# Test artifacts
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Temporary files
-*.tmp
-*.temp
-a.html 
-.mcp.json
-
-# Logs
-logs
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-dev-debug.log
-# Dependency directories
-node_modules/
-# Environment variables
-# Editor directories and files
-.idea
-.vscode
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# Task files
-# tasks.json
-# tasks/ 
