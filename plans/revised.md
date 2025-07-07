@@ -1,148 +1,166 @@
-#### **Phase 1: 关键代码修改**
 
-**任务 1.1: 移除 `torch.compile` 以消除兼容性警告和潜在开销**
+
+#### **Phase 1: 综合代码修改**
+
+**任务 1.1: 【稳定 · 根本性修复】在验证/测试阶段禁用混合精度**
 
 * **文件路径**: `train.py`
 
-* **目标函数**: `main()`
+* **目标函数**: `validate()`
 
-* **问题描述**: `torch.compile()` 与项目中使用的 `transformers` 版本存在兼容性问题，导致编译失败并回退到Eager模式。这不仅无法带来性能提升，还会增加启动时间和日志噪音。
+* **问题描述**: `float16`的数值范围（上限约6.5e4）是导致逆变换后`overflow`的根本原因。在验证阶段，数值稳定性比速度更重要，应使用`float32`。
 
-* **修改指令**:
-
-  1.  在 `main()` 函数中，定位到模型编译相关的代码块。
-  2.  删除或注释掉 `model = torch.compile(model)` 这一行以及相关的日志打印。
+* **修改指令**: 在 `validate()` 函数中，**完全移除** `with torch.autocast(...)` 上下文管理器。
 
 * **代码修改 (上下文展示)**:
 
   ```python
   # File: train.py
   
-  def main():
-      # ... (previous code)
-      
-      # --- Model, Optimizer, Loss ---
-      model = TEC_MoLLM(model_config).to(device)
-      
-      # --- Performance Optimizations ---
-      # --- START MODIFICATION 1.1.1 ---
-      # REMOVED: torch.compile() due to compatibility issues with transformers 4.41+
-      # REASON: This call fails with "torch.compiler has no attribute 'is_compiling'"
-      #         and falls back to eager mode, adding overhead without performance gains.
-      #         Disabling it simplifies debugging and ensures stable execution.
-      # if rank == 0:
-      #     logging.info("Compiling the model with torch.compile()...")
-      # model = torch.compile(model)
-      # if rank == 0:
-      #     logging.info("Model compiled successfully.")
-      # --- END MODIFICATION 1.1.1 ---
-  
-      # 2. Initialize Gradient Scaler for mixed-precision training
-      scaler = torch.cuda.amp.GradScaler()
-  
+  def validate(model, dataloader, loss_fn, device, edge_index, target_scaler_path, rank=0):
+      # ... (function start)
+      with torch.no_grad():
+          progress_bar = tqdm(dataloader, desc="Validating") if rank == 0 else dataloader
+          for batch in progress_bar:
+              # ... (data to device)
+              
+              # --- START MODIFICATION 1.1.1 ---
+              # REASON: Using float32 for validation is crucial for numerical stability.
+              #         The float16 range is too small to handle inverse-transformed
+              #         values, which was the root cause of the 'overflow' warning.
+              # REMOVED: with torch.autocast(device_type='cuda', dtype=torch.float16):
+              output = model(x, time_features, edge_index)
+              y_reshaped = y.permute(0, 3, 1, 2).reshape(B, -1, H * W, 1)
+              loss = loss_fn(output, y_reshaped)
+              # --- END MODIFICATION 1.1.1 ---
+              
+              total_loss += loss.item()
+              all_preds.append(output.cpu().numpy())
+              all_trues.append(y_reshaped.cpu().numpy())
       # ... (rest of the function)
   ```
 
-**任务 1.2: 修正 `Dataset` 样本对齐逻辑以避免数据丢失**
-
-* **文件路径**: `src/data/dataset.py`
-
-* **目标模块**: `class SlidingWindowSamplerDataset`
-
-* **问题描述**: 当前计算样本总数的逻辑 `len(X) - L_in + 1` 未考虑未来标签 `L_out` 的长度，导致最后 `L_out - 1` 个时间步的数据虽然有输入窗口，但没有完整的未来标签，实际上无法用于训练。
-
-* **修改指令**:
-
-  1.  在 `SlidingWindowSamplerDataset` 的 `__init__` 方法中，找到计算 `self.num_samples` 的行。
-  2.  将计算公式修改为 `len(self.X) - self.L_in - self.L_out + 1`，确保每个样本都有足够的输入和输出序列长度。
-
-* **代码修改 (上下文展示)**:
-
-  ```python
-  # File: src/data/dataset.py
-  
-  class SlidingWindowSamplerDataset(Dataset):
-      def __init__(self, data_path: str, mode: str, L_in: int = 336, L_out: int = 12):
-          # ... (previous code)
-          
-          # --- START MODIFICATION 1.2.1 ---
-          # REASON: The original calculation did not account for the output window length (L_out),
-          #         leading to index errors or using incomplete targets at the end of the dataset.
-          # OLD: self.num_samples = max(0, len(self.X) - self.L_in + 1)
-          # NEW:
-          self.num_samples = max(0, len(self.X) - self.L_in - self.L_out + 1)
-          # --- END MODIFICATION 1.2.1 ---
-          
-          if self.num_samples <= 0:
-              # ... (rest of the function)
-  ```
-
-**任务 1.3: 引入学习率调度器以动态调整学习率，辅助稳定训练**
+**任务 1.2: 【稳定】切换到更鲁棒的损失函数**
 
 * **文件路径**: `train.py`
 
 * **目标函数**: `main()`
 
-* **问题描述**: 恒定的学习率可能在训练后期过大，导致震荡或无法收敛。引入学习率调度器可以根据训练进程动态调整学习率，有助于模型跳出局部最优并更精细地收敛。
+* **问题描述**: `HuberLoss` 对异常值不敏感，能提供比`MSELoss`更稳定的梯度，有助于缓解数值问题并直接优化与MAE更相关的目标。
 
-* **修改指令**:
-
-  1.  在 `main()` 函数中，定位到 `optimizer` 的定义之后。
-  2.  实例化一个学习率调度器，推荐使用 `torch.optim.lr_scheduler.CosineAnnealingLR`，它能平滑地降低学习率。
-  3.  在训练循环的**每个 epoch 结束之后**，调用 `scheduler.step()` 来更新学习率。
+* **修改指令**: 将 `nn.MSELoss()` 替换为 `nn.HuberLoss(delta=1.0)`。
 
 * **代码修改 (上下文展示)**:
 
   ```python
-  # File: train.py
-  
-  def main():
-      # ... (previous code)
-  
-      optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
-      loss_fn = nn.MSELoss()
-  
-      # --- START MODIFICATION 1.3.1 ---
-      # REASON: Adds dynamic learning rate adjustment, which helps stabilize training
-      #         and allows for better convergence in later epochs. CosineAnnealingLR
-      #         is a robust choice for many deep learning tasks.
-      scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-7)
-      # --- END MODIFICATION 1.3.1 ---
-  
-      # --- Training Loop ---
-      # ...
-      try:
-          for epoch in range(args.epochs):
-              # ... (train_one_epoch and validate calls)
-              
-              # --- START MODIFICATION 1.3.2 ---
-              # Step the scheduler after each epoch
-              scheduler.step()
-              if rank == 0:
-                  logging.info(f"LR scheduler stepped. New LR: {scheduler.get_last_lr()[0]:.2e}")
-              # --- END MODIFICATION 1.3.2 ---
-  
-              if rank == 0:
-                  # ... (logging and saving logic)
+  # File: train.py, in main()
+  # --- START MODIFICATION 1.2.1 ---
+  # REASON: HuberLoss is more robust to outliers than MSELoss, stabilizing training.
+  # OLD: loss_fn = nn.MSELoss()
+  # NEW:
+  loss_fn = nn.HuberLoss(delta=1.0)
+  # --- END MODIFICATION 1.2.1 ---
   ```
 
-  *注：`CosineAnnealingLR`比`CosineAnnealingWarmRestarts`更简单，适合初步修复。*
+**任务 1.3: 【稳定】使用更智能的学习率调度器**
 
-**任务 1.4: 增强评估函数的鲁棒性**
+* **文件路径**: `train.py`
 
-* **文件路径**: `src/evaluation/metrics.py`
+* **目标函数**: `main()`
 
-* **目标函数**: `evaluate_metrics` 和 `evaluate_horizons`
-
-* **问题描述**:
-
-  1.  `Pearson R` 的计算方式在当前输入维度下存在逻辑冗余。
-  2.  `overflow` 警告表明有非有限值（`Inf`/`NaN`）传入，导致计算崩溃。需要增加防御性检查。
+* **问题描述**: `CosineAnnealingLR`可能会在训练后期将学习率降得过低。`ReduceLROnPlateau`能根据验证损失的表现自适应地降低学习率，更适合在模型性能饱和时进行调整。
 
 * **修改指令**:
 
-  1.  在 `evaluate_metrics` 函数中，修改 `pearsonr` 的计算，直接对展平后的一维数组进行。
-  2.  在 `evaluate_horizons` 函数的开头，对传入的 `y_pred_horizons_scaled` 进行 `np.isfinite` 检查。如果发现非有限值，打印警告并将其替换为0，以保证后续计算能继续进行。
+  1.  将`CosineAnnealingLR`替换为`ReduceLROnPlateau`，并设置`patience`和`factor`。
+  2.  在训练循环的 epoch 结束处，使用`val_loss`来调用`scheduler.step()`。
+
+* **代码修改 (上下文展示)**:
+
+  ```python
+  # File: train.py, in main()
+  
+  # --- START MODIFICATION 1.3.1 ---
+  # REASON: ReduceLROnPlateau provides adaptive learning rate adjustment based on
+  #         validation performance, which is more robust than a fixed cosine schedule.
+  # OLD: scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(...)
+  # NEW:
+  scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5, min_lr=1e-7)
+  # --- END MODIFICATION 1.3.1 ---
+  
+  # In training loop...
+  try:
+      for epoch in range(args.epochs):
+          # ...
+          val_loss, val_metrics = validate(...)
+  
+          # --- START MODIFICATION 1.3.2 ---
+          # Use validation loss to drive the scheduler
+          scheduler.step(val_loss)
+          if rank == 0:
+              # Note: get_last_lr() for ReduceLROnPlateau shows the *current* optimizer LR
+              logging.info(f"LR scheduler checked. Current LR: {optimizer.param_groups[0]['lr']:.2e}")
+          # --- END MODIFICATION 1.3.2 ---
+          
+          if rank == 0:
+              # ... (logging and saving logic)
+  ```
+
+**任务 1.4: 【突破】提升模型容量以学习更复杂的模式**
+
+* **文件路径**: `src/model/modules.py`
+
+* **目标模块**: `class LLMBackbone`
+
+* **问题描述**: 当前LoRA秩`r=16`可能限制了模型性能。增加`rank`是提升性能上限的关键。
+
+* **修改指令**: 在`LoraConfig`中，将`r`提升至`32`，`lora_alpha`提升至`64`。
+
+* **代码修改 (上下文展示)**:
+
+  ```python
+  # File: src/model/modules.py, in LLMBackbone.__init__()
+  # --- START MODIFICATION 1.4.1 ---
+  # REASON: Increasing LoRA rank enhances model capacity to learn complex patterns.
+  lora_config = LoraConfig(
+      r=32,             # OLD: 16
+      lora_alpha=64,    # OLD: 32
+      target_modules=["c_attn"],
+      lora_dropout=0.1,
+      bias="none"
+  )
+  # --- END MODIFICATION 1.4.1 ---
+  ```
+
+**任务 1.5: 【突破】引入Dropout以增强模型泛化能力**
+
+* **文件路径**: `src/model/tec_mollm.py`
+
+* **目标函数**: `forward()`
+
+* **修改指令**: 在`LLMBackbone`和`PredictionHead`之间加入`Dropout`层。
+
+* **代码修改 (上下文展示)**:
+
+  ```python
+  # File: src/model/tec_mollm.py, in TEC_MoLLM.forward()
+  # --- START MODIFICATION 1.5.1 ---
+  # REASON: Adds regularization to prevent overfitting and improve generalization.
+  x_llm = self.llm_backbone(...)
+  x_llm = torch.nn.functional.dropout(x_llm, p=0.1, training=self.training)
+  predictions = self.prediction_head(x_llm)
+  # --- END MODIFICATION 1.5.1 ---
+  ```
+
+**任务 1.6: 【稳定 · 终极保险】在评估阶段增加数值钳制**
+
+* **文件路径**: `src/evaluation/metrics.py`
+
+* **目标函数**: `evaluate_metrics()`
+
+* **问题描述**: 作为最终的防御性措施，确保所有参与指标计算的预测值都严格处于物理合理的范围内，为评估流程提供100%的数值稳定性保障。
+
+* **修改指令**: 在`evaluate_metrics()`函数中，对反归一化后的`y_pred_unscaled`使用`np.clip()`进行钳制。
 
 * **代码修改 (上下文展示)**:
 
@@ -150,52 +168,22 @@
   # File: src/evaluation/metrics.py
   
   def evaluate_metrics(y_true_scaled: np.ndarray, y_pred_scaled: np.ndarray, scaler) -> dict:
-      # ... (code for inverse transform)
+      # ... (inverse transform code)
+      y_true_unscaled = y_true_unscaled_reshaped.reshape(original_true_shape)
+      y_pred_unscaled = y_pred_unscaled_reshaped.reshape(original_pred_shape)
   
-      # --- START MODIFICATION 1.4.1 ---
-      # REASON: The original Pearson R calculation was flawed for single-feature predictions.
-      #         This version correctly calculates it on the flattened data arrays.
-      # OLD Pearson R block:
-      # pearson_coeffs = []
-      # for i in range(y_true_unscaled.shape[1]): ...
-      # avg_pearson_r = np.mean(pearson_coeffs)
+      # --- START MODIFICATION 1.6.1 (Re-added for ultimate stability) ---
+      # REASON: Adds a final safeguard to prevent any possible numerical issues
+      #         by ensuring all predicted values are within a physically
+      #         plausible range for TEC before metric calculation.
+      TEC_MIN, TEC_MAX = 0, 200  # Define physical bounds for TEC in TECU
+      y_pred_unscaled = np.clip(y_pred_unscaled, TEC_MIN, TEC_MAX)
+      # --- END MODIFICATION 1.6.1 ---
   
-      # NEW Pearson R calculation:
-      # Ensure arrays are 1D for pearsonr
-      y_true_flat = y_true_unscaled.ravel()
-      y_pred_flat = y_pred_unscaled.ravel()
-      if np.std(y_true_flat) > 0 and np.std(y_pred_flat) > 0:
-          avg_pearson_r = pearsonr(y_true_flat, y_pred_flat)[0]
-      else:
-          avg_pearson_r = 0.0
-      # --- END MODIFICATION 1.4.1 ---
-  
-      metrics = {
-          'mae': mae,
-          'rmse': rmse,
-          'r2_score': r2,
-          'pearson_r': avg_pearson_r
-      }
-      return metrics
-  
-  def evaluate_horizons(y_true_horizons_scaled: np.ndarray, y_pred_horizons_scaled: np.ndarray, target_scaler_path: str = None) -> dict:
-      logging.info("Evaluating metrics across all horizons...")
-  
-      # --- START MODIFICATION 1.4.2 ---
-      # REASON: Adds a defensive check to handle non-finite values (inf/nan) that
-      #         were causing the 'overflow' warning. This prevents crashes and
-      #         provides clear logging when numerical instability occurs.
-      if not np.all(np.isfinite(y_pred_horizons_scaled)):
-          num_non_finite = np.sum(~np.isfinite(y_pred_horizons_scaled))
-          logging.warning(
-              f"Overflow Guard: Found {num_non_finite} non-finite values in predictions. "
-              "Clamping them to 0 for metric calculation."
-          )
-          y_pred_horizons_scaled = np.nan_to_num(y_pred_horizons_scaled, nan=0.0, posinf=0.0, neginf=0.0)
-      # --- END MODIFICATION 1.4.2 ---
-  
-      # Load scaler if provided
+      if y_true_unscaled.ndim > 2:
       # ... (rest of the function)
   ```
+
+
 
 ---

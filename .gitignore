@@ -78,6 +78,8 @@ tests/
 # Project specific
 TEC-MoLLM-PRD.md
 experiments/
+plans/
+training_run_v3.1.log
 
 # GitHub/Agent specific
 AGENTS.md
