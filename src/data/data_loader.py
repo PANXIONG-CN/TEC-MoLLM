@@ -147,11 +147,17 @@ def _split_data(aggregated_data: dict) -> dict:
     # Create a pandas Series for easy boolean indexing with dates
     timestamps = pd.Series(aggregated_data['time'])
 
-    # Define split boundaries
-    train_end = '2014-12-31 23:59:59'
-    val_start = '2015-01-01 00:00:00'
-    val_end = '2015-06-30 23:59:59'
-    test_start = '2015-07-01 00:00:00'
+    # --- START MODIFICATION ---
+    # 假设您的13年数据是从 2013年初 到 2025年底
+    # 9年训练: 2013-2021
+    # 2年验证: 2022-2023
+    # ~1.4年测试: 2024.01-2025.04
+    # 请根据您的实际数据起止年份进行调整
+    train_end = '2021-12-31 23:59:59'
+    val_start = '2022-01-01 00:00:00'
+    val_end = '2023-12-31 23:59:59'
+    test_start = '2024-01-01 00:00:00'
+    # --- END MODIFICATION ---
 
     # Create boolean masks
     train_mask = timestamps <= train_end

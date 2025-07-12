@@ -20,12 +20,10 @@ def main():
     """
     logging.info("--- 开始执行离线数据预处理脚本 ---")
 
-    # 定义输入和输出路径
-    # 根据PRD和现有代码，我们处理2014和2015年的数据
-    file_paths = [
-        'data/raw/CRIM_SW2hr_AI_v1.2_2014_DataDrivenRange_CN.hdf5',
-        'data/raw/CRIM_SW2hr_AI_v1.2_2015_DataDrivenRange_CN.hdf5'
-    ]
+    # --- START MODIFICATION ---
+    # 列出您所有的13个HDF5数据文件
+    file_paths = [f'data/raw/CRIM_SW2hr_AI_v1.2_{year}_DataDrivenRange_CN.hdf5' for year in range(2013, 2026)]
+    # --- END MODIFICATION ---
     output_dir = 'data/processed'
     os.makedirs(output_dir, exist_ok=True)
     logging.info(f"输出目录 '{output_dir}' 已确认存在。")

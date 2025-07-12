@@ -27,20 +27,29 @@ def evaluate_metrics(y_true_scaled: np.ndarray, y_pred_scaled: np.ndarray, scale
     y_true_reshaped = y_true_scaled.reshape(-1, 1)
     y_pred_reshaped = y_pred_scaled.reshape(-1, 1)
     
-    # Apply inverse transform
-    y_true_unscaled_reshaped = scaler.inverse_transform(y_true_reshaped)
-    y_pred_unscaled_reshaped = scaler.inverse_transform(y_pred_reshaped)
+    # --- START MODIFICATION (CRITICAL FIX) ---
+    # REASON: The current preprocessing pipeline ONLY uses StandardScaler.
+    #         Therefore, the inverse operation is ONLY inverse_transform.
+    #         The previous expm1 call was a leftover from a different data
+    #         processing strategy and is causing overflow errors.
     
-    # Reshape back to original dimensions
-    y_true_unscaled = y_true_unscaled_reshaped.reshape(original_true_shape)
-    y_pred_unscaled = y_pred_unscaled_reshaped.reshape(original_pred_shape)
+    # Step 1: Inverse transform the standardization. The result is in physical units.
+    y_true_unscaled = scaler.inverse_transform(y_true_reshaped).reshape(original_true_shape)
+    y_pred_unscaled = scaler.inverse_transform(y_pred_reshaped).reshape(original_pred_shape)
+    
+    # Step 1.5: Add overflow protection for inverse transform results
+    if not np.all(np.isfinite(y_true_unscaled)):
+        logging.warning("Found non-finite values in y_true after inverse transform. Clamping to finite values.")
+        y_true_unscaled = np.nan_to_num(y_true_unscaled, nan=0.0, posinf=100.0, neginf=0.0)
+    
+    if not np.all(np.isfinite(y_pred_unscaled)):
+        logging.warning("Found non-finite values in y_pred after inverse transform. Clamping to finite values.")
+        y_pred_unscaled = np.nan_to_num(y_pred_unscaled, nan=0.0, posinf=100.0, neginf=0.0)
+    # --- END MODIFICATION ---
 
-    # --- START MODIFICATION 1.6.1 (Re-added for ultimate stability) ---
-    # REASON: 添加最终防护措施以防止任何可能的数值问题，
-    #         通过确保所有预测值都在 TEC 的物理合理范围内。
-    TEC_MIN, TEC_MAX = 0, 200  # 定义 TEC 的物理边界值（单位：TECU）
+    # Step 2: Now, apply clipping on the physical scale
+    TEC_MIN, TEC_MAX = 0, 200  # Define physical bounds for TEC in TECU
     y_pred_unscaled = np.clip(y_pred_unscaled, TEC_MIN, TEC_MAX)
-    # --- END MODIFICATION 1.6.1 ---
 
     if y_true_unscaled.ndim > 2: # Reshape if data is in (B, L, N, C) format
         y_true_unscaled = y_true_unscaled.reshape(-1, y_true_unscaled.shape[-1])

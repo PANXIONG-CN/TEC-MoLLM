@@ -21,11 +21,13 @@ class TEC_MoLLM(nn.Module):
         
         self.num_nodes = model_config['num_nodes']
         
-        # Subtask 11.1: Instantiate all sub-modules
+        # --- START MODIFICATION 1 ---
         self.spatio_temporal_embedding = SpatioTemporalEmbedding(
             d_emb=model_config['d_emb'],
-            num_nodes=self.num_nodes
+            num_nodes=self.num_nodes,
+            num_years=model_config.get('num_years', 13) # 从配置中获取年份数
         )
+        # --- END MODIFICATION 1 ---
         # The input to the spatial encoder is now the original channels + embedding dim
         spatial_in_channels = model_config['spatial_in_channels_base'] + model_config['d_emb']
         self.spatial_encoder = SpatialEncoder(
@@ -54,14 +56,15 @@ class TEC_MoLLM(nn.Module):
         )
         logging.info("TEC_MoLLM model initialized with all sub-modules.")
 
-    def forward(self, x: torch.Tensor, time_features: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, time_features: torch.Tensor, edge_index: torch.Tensor, edge_weight: torch.Tensor) -> torch.Tensor:
         """
         Defines the complete forward pass from input data to prediction.
         
         Args:
             x (torch.Tensor): Input features of shape (B, L_in, N, C_in).
-            time_features (torch.Tensor): Time features for embedding.
+            time_features (torch.Tensor): Time features for embedding, shape (B, L, N, 4).
             edge_index (torch.Tensor): Graph connectivity.
+            edge_weight (torch.Tensor): Graph edge weights.
             
         Returns:
             torch.Tensor: Final prediction of shape (B, L_out, N, 1).
@@ -75,7 +78,10 @@ class TEC_MoLLM(nn.Module):
         # Reshape for SpatialEncoder: (B, L, N, C) -> (B*L, N, C)
         C_in_with_emb = x.shape[-1]
         x_spatial = x.reshape(-1, N, C_in_with_emb)
-        x_spatial = self.spatial_encoder(x_spatial, edge_index)
+        
+        # --- START MODIFICATION 2 ---
+        x_spatial = self.spatial_encoder(x_spatial, edge_index, edge_weight)
+        # --- END MODIFICATION 2 ---
         
         # 3. TemporalEncoder
         # Reshape for TemporalEncoder: (B*L, N, C_out_spatial) -> (B*N, L, C_out_spatial)
@@ -89,10 +95,9 @@ class TEC_MoLLM(nn.Module):
         attention_mask = torch.ones(x_temporal.shape[:-1], device=x.device, dtype=torch.long)
         x_llm = self.llm_backbone(inputs_embeds=x_temporal, attention_mask=attention_mask)
         
-        # --- START MODIFICATION 1.5.1 ---
-        # REASON: 添加正则化以防止过拟合并改善泛化能力。
+        # --- START MODIFICATION 3 ---
         x_llm = torch.nn.functional.dropout(x_llm, p=0.1, training=self.training)
-        # --- END MODIFICATION 1.5.1 ---
+        # --- END MODIFICATION 3 ---
         
         # 5. PredictionHead
         predictions = self.prediction_head(x_llm) # Output: (B*N, L_out)

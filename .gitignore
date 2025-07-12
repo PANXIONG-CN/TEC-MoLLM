@@ -40,6 +40,7 @@ find_lr.py
 checkpoints/
 results/
 logs/
+plans/
 
 # Data files (optional - comment out if you want to track data)
 data/raw/*.hdf5

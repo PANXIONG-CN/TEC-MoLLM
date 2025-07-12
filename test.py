@@ -133,7 +133,7 @@ def main():
         "spatial_out_channels": 32, "spatial_heads": 2, "temporal_channel_list": [64, 128],
         "temporal_strides": [2, 2], "patch_len": patch_len, "d_llm": 768, 
         "llm_layers": args.llm_layers, "prediction_horizon": args.L_out, 
-        "temporal_seq_len": args.L_in
+        "temporal_seq_len": args.L_in, "num_years": 13
     }
     
     # --- 加载模型和获取预测 ---

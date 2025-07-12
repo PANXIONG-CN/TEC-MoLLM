@@ -19,13 +19,17 @@ class Multi_Scale_Conv_Block(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int, kernel_sizes: list = [3, 5, 7]):
         super().__init__()
         
+        # --- START MODIFICATION: Replace BatchNorm with GroupNorm ---
+        # REASON: GroupNorm is batch-size independent and more stable for time-series
+        #         and distributed training scenarios. GroupNorm with 1 group is equivalent to InstanceNorm.
         self.convs = nn.ModuleList([
             nn.Sequential(
                 nn.Conv1d(in_channels, out_channels, kernel_size=k, padding=(k - 1) // 2),
-                nn.BatchNorm1d(out_channels),
+                nn.GroupNorm(1, out_channels),  # GroupNorm with 1 group = InstanceNorm
                 nn.GELU()
             ) for k in kernel_sizes
         ])
+        # --- END MODIFICATION ---
         
         # The final convolution takes the concatenated output of all parallel convolutions
         # and applies the specified stride.
@@ -206,18 +210,22 @@ class LLMBackbone(nn.Module):
 
 class SpatioTemporalEmbedding(nn.Module):
     """
-    Creates learnable embeddings for nodes, time of day, and day of year.
+    Creates learnable embeddings for nodes and multiple time features.
     """
-    def __init__(self, d_emb: int, num_nodes: int = 2911):
+    def __init__(self, d_emb: int, num_nodes: int = 2911, num_years: int = 13):
         super().__init__()
-        
         self.d_emb = d_emb
-        # Subtask 6.2: Initialize Embedding Layers
-        self.node_embedding = nn.Embedding(num_embeddings=num_nodes, embedding_dim=d_emb)
-        self.tod_embedding = nn.Embedding(num_embeddings=12, embedding_dim=d_emb) # 12 time slots (2-hour intervals)
-        self.doy_embedding = nn.Embedding(num_embeddings=366, embedding_dim=d_emb) # 366 for leap years
         
-        logging.info("SpatioTemporalEmbedding module initialized.")
+        self.node_embedding = nn.Embedding(num_embeddings=num_nodes, embedding_dim=d_emb)
+        self.tod_embedding = nn.Embedding(num_embeddings=12, embedding_dim=d_emb)
+        self.doy_embedding = nn.Embedding(num_embeddings=366, embedding_dim=d_emb)
+        
+        # --- START MODIFICATION ---
+        self.year_embedding = nn.Embedding(num_embeddings=num_years, embedding_dim=d_emb)
+        self.season_embedding = nn.Embedding(num_embeddings=4, embedding_dim=d_emb)
+        # --- END MODIFICATION ---
+        
+        logging.info("SpatioTemporalEmbedding module initialized with year and season embeddings.")
 
     def forward(self, x: torch.Tensor, time_features: torch.Tensor) -> torch.Tensor:
         """
@@ -225,35 +233,33 @@ class SpatioTemporalEmbedding(nn.Module):
         
         Args:
             x (torch.Tensor): Input tensor of shape (B, L, N, C_in).
-            time_features (torch.Tensor): Time features of shape (B, L, N, 2) 
-                                          containing (hour_of_day, day_of_year).
+            time_features (torch.Tensor): Time features of shape (B, L, N, 4) 
+                                          containing (hour_of_day, day_of_year, year_index, season_index).
                                           
         Returns:
-            torch.Tensor: Output tensor with embeddings added, shape (B, L, N, C_in).
+            torch.Tensor: Output tensor with embeddings added, shape (B, L, N, C_in + d_emb).
         """
         batch_size, seq_len, num_nodes, _ = x.shape
         
-        # Subtask 6.3: Perform embedding lookups
         # Node embeddings: one for each node, repeat across batch and time
         node_ids = torch.arange(num_nodes, device=x.device)
-        node_emb = self.node_embedding(node_ids) # (N, d_emb)
+        node_emb = self.node_embedding(node_ids).view(1, 1, num_nodes, self.d_emb)
         
-        # TOD and DOY embeddings
-        tod_indices = time_features[..., 0].long() # (B, L, N)
-        doy_indices = time_features[..., 1].long() # (B, L, N)
-        tod_emb = self.tod_embedding(tod_indices) # (B, L, N, d_emb)
-        doy_emb = self.doy_embedding(doy_indices) # (B, L, N, d_emb)
+        # --- START MODIFICATION ---
+        # time_features is now (B, L, N, 4)
+        tod_indices = time_features[..., 0].long()
+        doy_indices = time_features[..., 1].long()
+        year_indices = time_features[..., 2].long()
+        season_indices = time_features[..., 3].long()
+
+        tod_emb = self.tod_embedding(tod_indices)
+        doy_emb = self.doy_embedding(doy_indices)
+        year_emb = self.year_embedding(year_indices)
+        season_emb = self.season_embedding(season_indices)
         
-        # Subtask 6.4: Broadcast and combine
-        # Reshape node_emb to be broadcastable
-        node_emb = node_emb.view(1, 1, num_nodes, self.d_emb) # (1, 1, N, d_emb)
-        
-        # Add the embeddings together. Broadcasting handles the dimensions.
-        combined_emb = node_emb + tod_emb + doy_emb # (B, L, N, d_emb)
-        
-        # The input features 'x' and the combined embeddings will be concatenated.
-        # To do this, we need to make sure the embedding is expanded to match the batch and seq len of x.
-        # Broadcasting already handled this. Now we concatenate along the last dimension.
+        temporal_emb = tod_emb + doy_emb + year_emb + season_emb
+        combined_emb = node_emb + temporal_emb
+        # --- END MODIFICATION ---
         
         output = torch.cat([x, combined_emb], dim=-1)
         
@@ -263,20 +269,28 @@ class PredictionHead(nn.Module):
     """
     Maps features from the LLM backbone to the final prediction sequence.
     """
-    def __init__(self, input_dim: int, output_dim: int):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dim_ratio: int = 4, dropout_rate: float = 0.1):
         """
         Args:
             input_dim (int): The flattened input dimension from the LLM (e.g., 21 * 768).
             output_dim (int): The output prediction dimension (e.g., 12).
+            hidden_dim_ratio (int): Ratio to reduce hidden dimension.
+            dropout_rate (float): Dropout rate for regularization.
         """
         super().__init__()
-        self.fc = nn.Linear(input_dim, output_dim)
-        # --- START MODIFICATION 1.1.1 ---
-        # REMOVED: self.activation = nn.ReLU() 
-        # REASON: The model must predict standardized values which can be negative.
-        #         ReLU introduces a positive bias, crippling regression performance.
-        # --- END MODIFICATION 1.1.1 ---
-        logging.info(f"PredictionHead initialized with input_dim={input_dim}, output_dim={output_dim}")
+        # --- START MODIFICATION 1.3.1 (Architecture Enhancement) ---
+        # REASON: A two-layer MLP provides more expressive power than a single
+        #         linear layer, allowing the model to learn more complex
+        #         mappings from latent features to the final predictions.
+        hidden_dim = input_dim // hidden_dim_ratio
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim, output_dim)
+        )
+        # --- END MODIFICATION 1.3.1 ---
+        logging.info(f"PredictionHead initialized with MLP structure.")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -292,11 +306,9 @@ class PredictionHead(nn.Module):
         batch_size = x.shape[0]
         x = x.view(batch_size, -1)
         
-        output = self.fc(x)
-        
-        # --- START MODIFICATION 1.1.2 ---
-        # REMOVED: output = self.activation(output)
-        # --- END MODIFICATION 1.1.2 ---
+        # --- START MODIFICATION 1.3.2 ---
+        output = self.mlp(x)
+        # --- END MODIFICATION 1.3.2 ---
         
         return output
 
@@ -325,27 +337,23 @@ class SpatialEncoder(nn.Module):
         self.output_channels = out_channels * heads
         logging.info(f"SpatialEncoder initialized with out_channels={self.output_channels}")
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, edge_weight: torch.Tensor = None) -> torch.Tensor:
         """
         Processes the batched graph data.
         
         Args:
             x (torch.Tensor): Batched node features of shape (B * L, N, C_in).
             edge_index (torch.Tensor): Graph connectivity in COO format.
+            edge_weight (torch.Tensor, optional): 兼容性参数，被忽略。
             
         Returns:
-            torch.Tensor: Updated node features of shape (B * L, N, C_out * heads).
+            torch.Tensor: Updated node features.
         """
-        # Subtask 7.3: Reshape input
         batch_size, num_nodes, in_channels = x.shape
-        # Reshape from (B*L, N, C) to (B*L*N, C) for PyG layer
         x_reshaped = x.reshape(-1, in_channels)
         
-        # Subtask 7.4: Apply GATv2 layer and reshape output
-        # The GAT layer operates on the full batch of nodes
+        # GATv2Conv不支持edge_weight参数，GAT通过注意力机制自动学习边权重
         gat_output = self.gat_conv(x_reshaped, edge_index)
         
-        # Reshape back to (B*L, N, C_out*heads)
         output = gat_output.view(batch_size, num_nodes, self.output_channels)
-        
         return output 

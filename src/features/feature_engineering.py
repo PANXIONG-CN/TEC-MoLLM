@@ -74,21 +74,30 @@ def extract_time_features(time_data: pd.DatetimeIndex) -> np.ndarray:
         time_data (pd.DatetimeIndex): Datetime index array
         
     Returns:
-        np.ndarray: Array of shape (N, 2) containing [time_of_day_slot, day_of_year]
-                   where time_of_day_slot is 0-11 for 2-hour intervals (0,2,4,...,22 hours)
+        np.ndarray: Array of shape (N, 4) containing 
+                   [time_of_day_slot, day_of_year, year_index, season_index]
     """
-    # Convert hour to 2-hour time slot indices (0-11)
-    # Hours 0,2,4,6,8,10,12,14,16,18,20,22 -> slots 0,1,2,3,4,5,6,7,8,9,10,11
+    logging.info("Extracting extended time features (TOD, DOY, Year, Season)...")
+    # 1. Time of day slot (0-11)
     time_of_day_slot = time_data.hour // 2
     
-    # Day of year (1-366) -> convert to 0-365 for embedding
+    # 2. Day of year (0-365)
     day_of_year = time_data.dayofyear - 1
     
-    # Stack into (N, 2) array
-    time_features = np.stack([time_of_day_slot, day_of_year], axis=-1)
+    # --- START MODIFICATION ---
+    # 3. Year index (e.g., 2014 -> 0, 2015 -> 1, ...)
+    #    This makes the embedding independent of the absolute year value.
+    start_year = time_data.year.min()
+    year_index = time_data.year - start_year
+
+    # 4. Season index (0:Winter, 1:Spring, 2:Summer, 3:Autumn)
+    #    Maps month to season index: (12,1,2)->0, (3,4,5)->1, (6,7,8)->2, (9,10,11)->3
+    season_index = (time_data.month % 12 + 3) // 3 - 1
+    # --- END MODIFICATION ---
+    
+    # Stack into (N, 4) array
+    time_features = np.stack([time_of_day_slot, day_of_year, year_index, season_index], axis=-1)
     logging.info(f"Extracted time features with shape: {time_features.shape}")
-    logging.info(f"Time slot range: {time_of_day_slot.min()}-{time_of_day_slot.max()}")
-    logging.info(f"Day of year range: {day_of_year.min()}-{day_of_year.max()}")
     
     return time_features
 
@@ -106,8 +115,15 @@ def create_features_and_targets(file_paths: list, horizon: int = 12) -> dict:
         logging.info(f"--- Processing split: {split_name} ---")
         scaled_indices = get_scaled_space_weather_indices(data)
         broadcasted = broadcast_indices(scaled_indices, data['tec'].shape[1:])
-        feature_tensor_X = construct_feature_tensor_X(data['tec'], broadcasted)
-        target_tensor_Y = construct_target_tensor_Y(data['tec'], horizon)
+        
+        # --- START MODIFICATION 1.4.1 (Data Transformation) ---
+        # REASON: Using direct physical space standardization instead of log transform
+        #         for simpler and more interpretable processing pipeline.
+        tec_data = data['tec']
+        # No transformation applied - work directly with physical TEC values
+        feature_tensor_X = construct_feature_tensor_X(tec_data, broadcasted)
+        target_tensor_Y = construct_target_tensor_Y(tec_data, horizon)
+        # --- END MODIFICATION 1.4.1 ---
         
         # Extract real time features from datetime data
         time_features = extract_time_features(data['time'])
