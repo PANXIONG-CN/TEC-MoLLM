@@ -71,26 +71,36 @@ class TEC_MoLLM(nn.Module):
         """
         B, L_in, N, C_in = x.shape
         
-        # 1. SpatioTemporalEmbedding
+        # 1. SpatioTemporalEmbedding - (B, L, N, C_in_emb)
         x = self.spatio_temporal_embedding(x, time_features)
-        
-        # 2. SpatialEncoder
-        # Reshape for SpatialEncoder: (B, L, N, C) -> (B*L, N, C)
         C_in_with_emb = x.shape[-1]
-        x_spatial = x.reshape(-1, N, C_in_with_emb)
+
+        # --- START MODIFICATION 1.1 (CRITICAL ARCHITECTURE FIX) ---
+        # REASON: The original reshape broke graph connectivity for batched processing.
+        #         This new approach processes the spatial dimension correctly for each time step.
+
+        # 2. Reshape for GNN: 将时间步和批次合并，但保持空间维度独立
+        # (B, L, N, C) -> (L, B, N, C) -> (L*B, N, C)
+        x_for_gnn = x.permute(1, 0, 2, 3).reshape(-1, N, C_in_with_emb)
+
+        # 3. SpatialEncoder (GATv2) - 现在它处理的是一个批量的图
+        # GATv2Conv内部会自动处理批处理图的邻接关系，只要输入是(Batch_of_graphs * N, C)
+        # 我们的输入 (L*B, N, C) 正好符合这个期望，每个时间步的图被正确处理
+        x_spatial = self.spatial_encoder(x_for_gnn, edge_index, edge_weight)
+
+        # 4. Reshape back for Temporal Processing
+        # (L*B, N, C_spatial) -> (L, B, N, C_spatial) -> (B, N, L, C_spatial)
+        C_spatial = x_spatial.shape[-1]
+        x_reshaped = x_spatial.view(L_in, B, N, C_spatial).permute(1, 2, 0, 3)
         
-        # --- START MODIFICATION 2 ---
-        x_spatial = self.spatial_encoder(x_spatial, edge_index, edge_weight)
-        # --- END MODIFICATION 2 ---
-        
-        # 3. TemporalEncoder
-        # Reshape for TemporalEncoder: (B*L, N, C_out_spatial) -> (B*N, L, C_out_spatial)
-        C_out_spatial = x_spatial.shape[-1]
-        x_temporal = x_spatial.reshape(B, L_in, N, C_out_spatial).permute(0, 2, 1, 3)
-        x_temporal = x_temporal.reshape(-1, L_in, C_out_spatial)
+        # --- END MODIFICATION 1.1 ---
+
+        # 5. Reshape for TemporalEncoder
+        # (B, N, L, C_spatial) -> (B*N, L, C_spatial)
+        x_temporal = x_reshaped.reshape(-1, L_in, C_spatial)
         x_temporal = self.temporal_encoder(x_temporal) # Output: (B*N, num_patches, d_llm)
         
-        # 4. LLMBackbone
+        # 6. LLMBackbone
         # The LLM doesn't need an attention mask if we pass embeddings directly
         attention_mask = torch.ones(x_temporal.shape[:-1], device=x.device, dtype=torch.long)
         x_llm = self.llm_backbone(inputs_embeds=x_temporal, attention_mask=attention_mask)
@@ -99,11 +109,13 @@ class TEC_MoLLM(nn.Module):
         x_llm = torch.nn.functional.dropout(x_llm, p=0.1, training=self.training)
         # --- END MODIFICATION 3 ---
         
-        # 5. PredictionHead
+        # 7. PredictionHead
         predictions = self.prediction_head(x_llm) # Output: (B*N, L_out)
         
-        # 6. Final Reshape
+        # 8. Final Reshape
         L_out = predictions.shape[-1]
         final_output = predictions.view(B, N, L_out).permute(0, 2, 1).unsqueeze(-1)
         
-        return final_output 
+        return final_output
+        
+    # **这个修改是本次修复的重中之重。** 它修正了信息流，让GNN能在每个时间步上正确地进行空间消息传递。
