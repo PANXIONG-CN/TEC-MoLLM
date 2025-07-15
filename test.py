@@ -16,15 +16,81 @@ from src.evaluation.metrics import evaluate_horizons
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def get_tec_mollm_predictions(model, dataloader, device, edge_index):
+def inverse_transform_output(tensor_scaled: torch.Tensor, scaler) -> torch.Tensor:
+    """
+    辅助函数：将标准化的张量通过scaler进行逆变换
+    
+    Args:
+        tensor_scaled (torch.Tensor): 标准化的张量，形状为 (B, ..., C) 或 (B, ...)
+        scaler: 已拟合的StandardScaler
+        
+    Returns:
+        torch.Tensor: 逆变换后的张量，保持原始形状
+    """
+    original_shape = tensor_scaled.shape
+    
+    # 如果是单特征张量，需要添加特征维度
+    if len(original_shape) == 3:  # (B, H, W) -> (B, H, W, 1)
+        tensor_reshaped = tensor_scaled.reshape(-1, 1)
+    else:  # (B, H, W, C) -> (B*H*W*C, 1) for single feature
+        tensor_reshaped = tensor_scaled.reshape(-1, 1)
+    
+    # 转换为numpy进行逆变换
+    tensor_numpy = tensor_reshaped.cpu().numpy()
+    tensor_unscaled_numpy = scaler.inverse_transform(tensor_numpy)
+    
+    # 转换回tensor并恢复原始形状
+    tensor_unscaled = torch.from_numpy(tensor_unscaled_numpy).to(tensor_scaled.device)
+    tensor_unscaled = tensor_unscaled.reshape(original_shape)
+    
+    return tensor_unscaled
+
+def transform_output(tensor_unscaled: torch.Tensor, scaler) -> torch.Tensor:
+    """
+    辅助函数：将物理值张量通过scaler进行标准化
+    
+    Args:
+        tensor_unscaled (torch.Tensor): 物理值张量
+        scaler: 已拟合的StandardScaler
+        
+    Returns:
+        torch.Tensor: 标准化后的张量，保持原始形状
+    """
+    original_shape = tensor_unscaled.shape
+    
+    # 重塑为scaler期望的形状
+    if len(original_shape) == 3:  # (B, H, W) -> (B, H, W, 1)
+        tensor_reshaped = tensor_unscaled.reshape(-1, 1)
+    else:  # (B, H, W, C) -> (B*H*W*C, 1) for single feature
+        tensor_reshaped = tensor_unscaled.reshape(-1, 1)
+    
+    # 转换为numpy进行标准化
+    tensor_numpy = tensor_reshaped.cpu().numpy()
+    tensor_scaled_numpy = scaler.transform(tensor_numpy)
+    
+    # 转换回tensor并恢复原始形状
+    tensor_scaled = torch.from_numpy(tensor_scaled_numpy).to(tensor_unscaled.device)
+    tensor_scaled = tensor_scaled.reshape(original_shape)
+    
+    return tensor_scaled
+
+def get_tec_mollm_predictions(model, dataloader, device, edge_index, target_scaler_path):
     """获取TEC-MoLLM模型的预测结果"""
     model.eval()
     all_preds = []
     all_trues = []
+    
+    # --- START MODIFICATION: Load scalers for residual reconstruction ---
+    # REASON: Need to load both target_scaler and feature_scaler for proper reconstruction
+    target_scaler = joblib.load(target_scaler_path)
+    feature_scaler_path = target_scaler_path.replace('target_scaler.joblib', 'scaler.joblib')
+    feature_scaler = joblib.load(feature_scaler_path)
+    # --- END MODIFICATION ---
+    
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="TEC-MoLLM Inference"):
             x = batch['x'].to(device)
-            y = batch['y'].to(device)
+            y_residual_scaled = batch['y'].to(device)
             time_features = batch['x_time_features'].to(device)
             
             # 与train.py中validate函数相同的reshape逻辑
@@ -34,18 +100,47 @@ def get_tec_mollm_predictions(model, dataloader, device, edge_index):
             if time_features.numel() > 0:
                 time_features = time_features.unsqueeze(-2).expand(B, L, H * W, -1)  # (B, L, N, 2)
             
-            output = model(x, time_features, edge_index)
+            # 1. Get model's residual prediction (scaled)
+            output_residual_scaled = model(x, time_features, edge_index)
             # Reshape target to match output: (B, H, W, L_out) -> (B, L_out, H*W, 1)
-            y_reshaped = y.permute(0, 3, 1, 2).reshape(B, -1, H * W, 1)
+            y_reshaped = y_residual_scaled.permute(0, 3, 1, 2).reshape(B, -1, H * W, 1)
             
-            all_preds.append(output.cpu().numpy())
-            all_trues.append(y_reshaped.cpu().numpy())
+            # --- START MODIFICATION: Reconstruct to absolute values and re-scale ---
+            # 2. Get persistence baseline (this is the last known TEC value from input X)
+            # It's the first channel of the last time step. Shape: (B, H*W, 1)
+            persistence_baseline_from_x_scaled = x[:, -1, :, 0].unsqueeze(-1)  # (B, H*W, 1)
+            
+            # 3. Inverse transform all parts to get physical values
+            # Note: output is (B, L_out, H*W, 1), need to handle properly
+            output_residual_unscaled = inverse_transform_output(output_residual_scaled, target_scaler)
+            y_residual_unscaled = inverse_transform_output(y_reshaped, target_scaler)
+            
+            # Baseline is from X, so use feature_scaler, only on the first feature (TEC)
+            # We need to extract just the TEC feature for the baseline
+            persistence_baseline_unscaled = inverse_transform_output(persistence_baseline_from_x_scaled, target_scaler)
+            
+            # 4. Reconstruct absolute physical values
+            # Expand baseline to match the prediction horizon
+            L_out = output_residual_unscaled.shape[1]
+            persistence_baseline_expanded = persistence_baseline_unscaled.unsqueeze(1).expand(-1, L_out, -1, -1)
+            
+            output_absolute_unscaled = persistence_baseline_expanded + output_residual_unscaled
+            target_absolute_unscaled = persistence_baseline_expanded + y_residual_unscaled
+            
+            # 5. Re-scale the absolute values to feed into metrics.py
+            # This ensures metrics.py always sees data in the same "target" scale.
+            output_final_scaled = transform_output(output_absolute_unscaled, target_scaler)
+            target_final_scaled = transform_output(target_absolute_unscaled, target_scaler)
+            
+            all_preds.append(output_final_scaled.cpu().numpy())
+            all_trues.append(target_final_scaled.cpu().numpy())
+            # --- END MODIFICATION ---
     
     return np.concatenate(all_trues, axis=0), np.concatenate(all_preds, axis=0)
 
 def get_baseline_predictions(test_dataset, L_in, L_out):
-    """生成简单的基线预测"""
-    logging.info("生成历史平均基线预测...")
+    """生成简单的基线预测（残差形式）"""
+    logging.info("生成持久化模型基线预测（残差形式）...")
     
     predictions = []
     
@@ -54,16 +149,21 @@ def get_baseline_predictions(test_dataset, L_in, L_out):
         sample = test_dataset[i]
         x_window = sample['x'].numpy()  # (L_in, H, W, C)
         
-        # 计算历史平均值 (对时间维度求平均)
-        # 只使用TEC特征（第0个特征）进行预测
-        historical_avg = np.mean(x_window[:, :, :, 0:1], axis=0, keepdims=True)  # (1, H, W, 1)
+        # --- START MODIFICATION: Generate residual baseline predictions ---
+        # REASON: Since we're now predicting residuals, the persistence model baseline
+        #         should predict zero residuals (future = current, so residual = 0)
         
-        # 重复L_out次作为未来预测
-        pred = np.repeat(historical_avg, L_out, axis=0)  # (L_out, H, W, 1)
+        # For persistence model in residual space, the prediction is always 0
+        # because persistence assumes future values equal current values
+        # So: residual = future - current = current - current = 0
+        
+        H, W = x_window.shape[1], x_window.shape[2]
+        pred_residual = np.zeros((L_out, H, W, 1))  # All zeros for residual prediction
         
         # 转换为期望的格式 (H, W, L_out)
-        pred_reshaped = pred.transpose(1, 2, 0, 3).squeeze(-1)  # (H, W, L_out)
+        pred_reshaped = pred_residual.transpose(1, 2, 0, 3).squeeze(-1)  # (H, W, L_out)
         predictions.append(pred_reshaped)
+        # --- END MODIFICATION ---
     
     # 转换为最终格式 (num_samples, H, W, L_out)
     predictions = np.array(predictions)
@@ -192,22 +292,51 @@ def main():
     edge_index = torch.load(args.graph_path)['edge_index'].to(device)
     
     logging.info("获取TEC-MoLLM预测结果...")
-    y_true, y_pred_mollm = get_tec_mollm_predictions(model, test_loader, device, edge_index)
+    y_true, y_pred_mollm = get_tec_mollm_predictions(model, test_loader, device, edge_index, args.target_scaler_path)
     
     # 基线预测
     logging.info("生成基线预测...")
     y_pred_ha = get_baseline_predictions(test_dataset, args.L_in, args.L_out)
     
-    # 需要将基线预测重塑为与y_true相同的格式
-    # y_true: (num_samples, L_out, H*W, 1)
-    # y_pred_ha: (num_samples, H, W, L_out)
-    B, H, W, L_out = y_pred_ha.shape
-    y_pred_ha_reshaped = y_pred_ha.transpose(0, 3, 1, 2).reshape(B, L_out, H*W, 1)
+    # --- START MODIFICATION: Process baseline predictions consistently ---
+    # REASON: Need to ensure baseline predictions are in the same scale as TEC-MoLLM predictions
+    #         for fair comparison. Since TEC-MoLLM predictions are already processed to absolute
+    #         values and re-scaled, we need to do the same for baseline.
+    
+    # Need to align dimensions: y_pred_ha is currently residuals (zeros)
+    # We need to convert it to absolute values by adding persistence baseline
+    logging.info("处理基线预测以保持一致性...")
+    
+    # Load scalers
+    target_scaler = joblib.load(args.target_scaler_path)
+    
+    baseline_absolute_predictions = []
+    for i in range(len(test_dataset)):
+        sample = test_dataset[i]
+        x_window = sample['x'].numpy()  # (L_in, H, W, C)
+        
+        # Get the last known TEC value (persistence baseline)
+        last_tec_value = x_window[-1, :, :, 0]  # (H, W)
+        
+        # Create persistence prediction (repeat last value for L_out steps)
+        persistence_pred = np.tile(last_tec_value[:, :, np.newaxis], (1, 1, args.L_out))  # (H, W, L_out)
+        
+        baseline_absolute_predictions.append(persistence_pred)
+    
+    y_pred_ha_absolute = np.array(baseline_absolute_predictions)  # (num_samples, H, W, L_out)
+    
+    # Convert to same format as TEC-MoLLM predictions: (num_samples, L_out, H*W, 1)
+    B, H, W, L_out = y_pred_ha_absolute.shape
+    y_pred_ha_reshaped = y_pred_ha_absolute.transpose(0, 3, 1, 2).reshape(B, L_out, H*W, 1)
+    
+    # Apply target scaler normalization to match TEC-MoLLM prediction format
+    y_pred_ha_scaled = transform_output(torch.from_numpy(y_pred_ha_reshaped).float(), target_scaler).numpy()
+    # --- END MODIFICATION ---
     
     # 确保基线预测的样本数与真实值匹配
-    min_samples = min(len(y_true), len(y_pred_ha_reshaped))
+    min_samples = min(len(y_true), len(y_pred_ha_scaled))
     y_true_matched = y_true[:min_samples]
-    y_pred_ha_matched = y_pred_ha_reshaped[:min_samples]
+    y_pred_ha_matched = y_pred_ha_scaled[:min_samples]
     
     # --- 评估指标 ---
     logging.info("评估TEC-MoLLM模型...")

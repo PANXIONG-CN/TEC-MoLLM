@@ -28,6 +28,64 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+def inverse_transform_output(tensor_scaled: torch.Tensor, scaler) -> torch.Tensor:
+    """
+    辅助函数：将标准化的张量通过scaler进行逆变换
+    
+    Args:
+        tensor_scaled (torch.Tensor): 标准化的张量，形状为 (B, ..., C) 或 (B, ...)
+        scaler: 已拟合的StandardScaler
+        
+    Returns:
+        torch.Tensor: 逆变换后的张量，保持原始形状
+    """
+    original_shape = tensor_scaled.shape
+    
+    # 如果是单特征张量，需要添加特征维度
+    if len(original_shape) == 3:  # (B, H, W) -> (B, H, W, 1)
+        tensor_reshaped = tensor_scaled.reshape(-1, 1)
+    else:  # (B, H, W, C) -> (B*H*W*C, 1) for single feature
+        tensor_reshaped = tensor_scaled.reshape(-1, 1)
+    
+    # 转换为numpy进行逆变换
+    tensor_numpy = tensor_reshaped.cpu().numpy()
+    tensor_unscaled_numpy = scaler.inverse_transform(tensor_numpy)
+    
+    # 转换回tensor并恢复原始形状
+    tensor_unscaled = torch.from_numpy(tensor_unscaled_numpy).to(tensor_scaled.device)
+    tensor_unscaled = tensor_unscaled.reshape(original_shape)
+    
+    return tensor_unscaled
+
+def transform_output(tensor_unscaled: torch.Tensor, scaler) -> torch.Tensor:
+    """
+    辅助函数：将物理值张量通过scaler进行标准化
+    
+    Args:
+        tensor_unscaled (torch.Tensor): 物理值张量
+        scaler: 已拟合的StandardScaler
+        
+    Returns:
+        torch.Tensor: 标准化后的张量，保持原始形状
+    """
+    original_shape = tensor_unscaled.shape
+    
+    # 重塑为scaler期望的形状
+    if len(original_shape) == 3:  # (B, H, W) -> (B, H, W, 1)
+        tensor_reshaped = tensor_unscaled.reshape(-1, 1)
+    else:  # (B, H, W, C) -> (B*H*W*C, 1) for single feature
+        tensor_reshaped = tensor_unscaled.reshape(-1, 1)
+    
+    # 转换为numpy进行标准化
+    tensor_numpy = tensor_reshaped.cpu().numpy()
+    tensor_scaled_numpy = scaler.transform(tensor_numpy)
+    
+    # 转换回tensor并恢复原始形状
+    tensor_scaled = torch.from_numpy(tensor_scaled_numpy).to(tensor_unscaled.device)
+    tensor_scaled = tensor_scaled.reshape(original_shape)
+    
+    return tensor_scaled
+
 def setup_distributed():
     """Initialize distributed training"""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
@@ -132,11 +190,19 @@ def validate(model, dataloader, loss_fn, device, edge_index, edge_weight, target
     total_loss = 0
     all_preds = []
     all_trues = []
+    
+    # --- START MODIFICATION: Load scalers for residual reconstruction ---
+    # REASON: Need to load both target_scaler and feature_scaler for proper reconstruction
+    target_scaler = joblib.load(target_scaler_path)
+    feature_scaler_path = target_scaler_path.replace('target_scaler.joblib', 'scaler.joblib')
+    feature_scaler = joblib.load(feature_scaler_path)
+    # --- END MODIFICATION ---
+    
     with torch.no_grad():
         progress_bar = tqdm(dataloader, desc="Validating") if rank == 0 else dataloader
         for batch in progress_bar:
             x = batch['x'].to(device)
-            y = batch['y'].to(device)
+            y_residual_scaled = batch['y'].to(device)
             time_features = batch['x_time_features'].to(device)
 
             B, L, H, W, C = x.shape
@@ -144,17 +210,46 @@ def validate(model, dataloader, loss_fn, device, edge_index, edge_weight, target
             if time_features.numel() > 0:
                 time_features = time_features.unsqueeze(-2).expand(B, L, H * W, -1)
             
-            output = model(x, time_features, edge_index, edge_weight) # <--- 传入edge_weight
-            y_reshaped = y.permute(0, 3, 1, 2).reshape(B, -1, H * W, 1)
-            loss = loss_fn(output, y_reshaped)
+            # 1. Get model's residual prediction (scaled)
+            output_residual_scaled = model(x, time_features, edge_index, edge_weight)
+            y_reshaped = y_residual_scaled.permute(0, 3, 1, 2).reshape(B, -1, H * W, 1)
+            loss = loss_fn(output_residual_scaled, y_reshaped)
+            
+            # --- START MODIFICATION: Reconstruct to absolute values and re-scale ---
+            # 2. Get persistence baseline (this is the last known TEC value from input X)
+            # It's the first channel of the last time step. Shape: (B, H*W, 1)
+            persistence_baseline_from_x_scaled = x[:, -1, :, 0].unsqueeze(-1)  # (B, H*W, 1)
+            
+            # 3. Inverse transform all parts to get physical values
+            # Note: output is (B, L_out, H*W, 1), need to handle properly
+            output_residual_unscaled = inverse_transform_output(output_residual_scaled, target_scaler)
+            y_residual_unscaled = inverse_transform_output(y_reshaped, target_scaler)
+            
+            # Baseline is from X, so use feature_scaler, only on the first feature (TEC)
+            # We need to extract just the TEC feature for the baseline
+            persistence_baseline_unscaled = inverse_transform_output(persistence_baseline_from_x_scaled, target_scaler)
+            
+            # 4. Reconstruct absolute physical values
+            # Expand baseline to match the prediction horizon
+            L_out = output_residual_unscaled.shape[1]
+            persistence_baseline_expanded = persistence_baseline_unscaled.unsqueeze(1).expand(-1, L_out, -1, -1)
+            
+            output_absolute_unscaled = persistence_baseline_expanded + output_residual_unscaled
+            target_absolute_unscaled = persistence_baseline_expanded + y_residual_unscaled
+            
+            # 5. Re-scale the absolute values to feed into metrics.py
+            # This ensures metrics.py always sees data in the same "target" scale.
+            output_final_scaled = transform_output(output_absolute_unscaled, target_scaler)
+            target_final_scaled = transform_output(target_absolute_unscaled, target_scaler)
+            
+            all_preds.append(output_final_scaled.cpu().numpy())
+            all_trues.append(target_final_scaled.cpu().numpy())
+            # --- END MODIFICATION ---
             
             total_loss += loss.item()
             
-            all_preds.append(output.cpu().numpy())
-            all_trues.append(y_reshaped.cpu().numpy())
-            
             # 立即清理GPU内存
-            del x, y, time_features, output, y_reshaped
+            del x, y_residual_scaled, time_features, output_residual_scaled, y_reshaped
             torch.cuda.empty_cache()
             
     avg_loss = total_loss / len(dataloader)

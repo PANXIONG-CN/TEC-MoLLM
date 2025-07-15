@@ -122,8 +122,43 @@ def create_features_and_targets(file_paths: list, horizon: int = 12) -> dict:
         tec_data = data['tec']
         # No transformation applied - work directly with physical TEC values
         feature_tensor_X = construct_feature_tensor_X(tec_data, broadcasted)
-        target_tensor_Y = construct_target_tensor_Y(tec_data, horizon)
+        target_tensor_Y_absolute = construct_target_tensor_Y(tec_data, horizon)
         # --- END MODIFICATION 1.4.1 ---
+        
+        # --- START MODIFICATION: Calculate Residual Target Y ---
+        # REASON: To change the learning target from absolute TEC values to their
+        #         change over time (residuals), simplifying the learning task.
+        
+        logging.info("Calculating residual targets (Y_t - Y_persistence)...")
+
+        # Step 1: Create the persistence baseline tensor.
+        # For each time `t`, the baseline for the future `h` steps is just tec_data[t].
+        # tec_data shape: (T, N_lat, N_lon)
+        # target_tensor_Y_absolute shape: (T-horizon, N_lat, N_lon, horizon)
+        
+        # The persistence baseline for Y_absolute at time `t` is tec_data at time `t`.
+        # We need to correctly align them. The target for a data window ending at time `t`
+        # are the values at `t+1, ..., t+horizon`.
+        # The persistence baseline for this is the value at time `t`.
+        
+        num_total_timesteps = tec_data.shape[0]
+        num_targets = target_tensor_Y_absolute.shape[0]
+        
+        # Create persistence baseline: tec_data[t] repeated horizon times
+        # Shape: (num_targets, N_lat, N_lon, horizon)
+        persistence_baseline = np.expand_dims(tec_data[:num_targets], axis=-1)  # (num_targets, N_lat, N_lon, 1)
+        persistence_baseline = np.repeat(persistence_baseline, horizon, axis=-1)  # (num_targets, N_lat, N_lon, horizon)
+        
+        # Step 2: Calculate the residual target.
+        # Y_residual = Y_absolute - persistence_baseline
+        target_tensor_Y_residual = target_tensor_Y_absolute - persistence_baseline
+        
+        logging.info(f"Residual targets calculated. Shape: {target_tensor_Y_residual.shape}")
+        logging.info(f"Persistence baseline shape: {persistence_baseline.shape}")
+        
+        # Return the residual Y instead of the absolute Y
+        target_tensor_Y = target_tensor_Y_residual
+        # --- END MODIFICATION ---
         
         # Extract real time features from datetime data
         time_features = extract_time_features(data['time'])

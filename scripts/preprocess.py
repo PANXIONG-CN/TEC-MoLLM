@@ -31,10 +31,13 @@ def main():
     # --- 1. 创建特征和目标 ---
     # 这个函数内部已经包含了数据加载、拆分和特征工程
     # PRD中默认的L_out是12，这里保持一致
+    # 注意：现在create_features_and_targets返回的是残差目标Y_residual
+    logging.info("创建特征和残差目标张量...")
     processed_splits = create_features_and_targets(file_paths, horizon=12)
     if not processed_splits:
         logging.error("创建特征和目标失败。正在中止脚本。")
         return
+    logging.info("残差目标张量创建完成。现在Y表示相对于持久化基线的残差值。")
 
     # --- 2. 标准化特征 (X) ---
     # 这个函数会拟合并保存scaler.joblib，然后返回标准化后的数据
@@ -53,8 +56,11 @@ def main():
     # NEW LOGIC:
     # REASON: The target scaler must be fitted on the actual target data (Y)
     #         to correctly capture its statistical properties for normalization.
+    #         现在Y是残差数据，所以target_scaler在残差数据上训练。
+    logging.info("为残差目标Y创建标准化器...")
     train_y_data = processed_splits['train']['Y']
     train_tec_reshaped = train_y_data.reshape(-1, 1)
+    logging.info(f"训练集残差目标形状: {train_y_data.shape}, 重塑后: {train_tec_reshaped.shape}")
     # --- END MODIFICATION 1.2.1 ---
     
     target_scaler.fit(train_tec_reshaped)
