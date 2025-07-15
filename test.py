@@ -70,6 +70,24 @@ def get_baseline_predictions(test_dataset, L_in, L_out):
     
     return predictions
 
+def find_latest_checkpoint(checkpoint_dir='checkpoints'):
+    """查找最新的checkpoint文件"""
+    import glob
+    pattern = os.path.join(checkpoint_dir, 'best_model_*.pth')
+    checkpoint_files = glob.glob(pattern)
+    
+    if not checkpoint_files:
+        # 如果没有找到动态命名的文件，尝试默认文件
+        default_path = os.path.join(checkpoint_dir, 'best_model.pth')
+        if os.path.exists(default_path):
+            return default_path
+        else:
+            raise FileNotFoundError(f"No checkpoint files found in {checkpoint_dir}")
+    
+    # 按修改时间排序，返回最新的
+    latest_checkpoint = max(checkpoint_files, key=os.path.getmtime)
+    return latest_checkpoint
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="评估TEC-MoLLM和基线模型")
@@ -85,7 +103,8 @@ def parse_args():
     # 文件路径
     parser.add_argument('--target_scaler_path', type=str, default='data/processed/target_scaler.joblib')
     parser.add_argument('--graph_path', type=str, default='data/processed/graph_A.pt')
-    parser.add_argument('--model_checkpoint', type=str, default='checkpoints/best_model.pth')
+    parser.add_argument('--model_checkpoint', type=str, default='checkpoints/best_model.pth', 
+                        help='Path to model checkpoint. Use "latest" to auto-find the most recent checkpoint.')
     parser.add_argument('--output_dir', type=str, default='results')
     parser.add_argument('--batch_size', type=int, default=16)
     
@@ -130,7 +149,7 @@ def main():
     
     model_config = {
         "num_nodes": 2911, "d_emb": args.d_emb, "spatial_in_channels_base": 6,
-        "spatial_out_channels": 32, "spatial_heads": 2, "temporal_channel_list": [64, 128],
+        "spatial_out_channels": 11, "spatial_heads": 2, "temporal_channel_list": [64, 128], # 修改为11*2=22，与输入维度一致用于残差连接
         "temporal_strides": [2, 2], "patch_len": patch_len, "d_llm": 768, 
         "llm_layers": args.llm_layers, "prediction_horizon": args.L_out, 
         "temporal_seq_len": args.L_in, "num_years": 13
@@ -143,8 +162,18 @@ def main():
     logging.info("加载TEC-MoLLM模型...")
     model = TEC_MoLLM(model_config).to(device)
     
+    # --- START MODIFICATION: Support dynamic checkpoint naming ---
+    # 处理"latest"选项或直接使用指定的checkpoint路径
+    if args.model_checkpoint == "latest":
+        checkpoint_path = find_latest_checkpoint()
+        logging.info(f"自动找到最新checkpoint: {checkpoint_path}")
+    else:
+        checkpoint_path = args.model_checkpoint
+        logging.info(f"使用指定checkpoint: {checkpoint_path}")
+    
     # 加载模型权重（处理DDP和torch.compile保存的模型）
-    checkpoint = torch.load(args.model_checkpoint, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # --- END MODIFICATION ---
     
     # 创建一个新的state_dict来存储修复后的键
     new_state_dict = {}

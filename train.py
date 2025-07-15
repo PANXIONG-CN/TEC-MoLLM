@@ -200,6 +200,28 @@ def parse_args():
 def main():
     args = parse_args()
     
+    # --- START MODIFICATION: Dynamic Run Naming ---
+    # 1. 创建一个唯一的、信息丰富的运行名称
+    import pandas as pd
+    timestamp = pd.Timestamp.now().strftime('%Y%m%d-%H%M')
+    run_name = (
+        f"L{args.L_in}_S{args.train_stride}_B{args.batch_size}_"
+        f"LR{args.lr}_LLM{args.llm_layers}_{timestamp}"
+    )
+    
+    # 2. 为日志文件使用这个名称
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_path = os.path.join(log_dir, f"{run_name}.log")
+    # 注意：使用tee命令时，文件名是在命令行指定的。
+    # 这里主要是为了让shell脚本使用。
+    
+    # 3. 为checkpoint目录和文件使用这个名称
+    checkpoint_dir = "checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    best_model_path = os.path.join(checkpoint_dir, f"best_model_{run_name}.pth")
+    # --- END MODIFICATION ---
+    
     # 内存优化设置
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
     torch.cuda.empty_cache()
@@ -210,6 +232,7 @@ def main():
     
     # Only log from rank 0 to avoid duplicate messages
     if rank == 0:
+        logging.info(f"===== Starting Run: {run_name} =====")
         logging.info(f"Using device: {device}")
         logging.info(f"Distributed training: rank {rank}/{world_size}")
         logging.info(f"Training configuration: L_in={args.L_in}, L_out={args.L_out}, epochs={args.epochs}")
@@ -239,7 +262,7 @@ def main():
     model_config = {
         "num_nodes": 2911, "d_emb": args.d_emb, 
         "spatial_in_channels_base": 6, # 实际数据特征维度：6
-        "spatial_out_channels": 32, "spatial_heads": 2, "temporal_channel_list": [64, 128],
+        "spatial_out_channels": 11, "spatial_heads": 2, "temporal_channel_list": [64, 128], # 修改为11*2=22，与输入维度一致用于残差连接
         "temporal_strides": [2, 2], "patch_len": patch_len, "d_llm": 768, "llm_layers": args.llm_layers,
         "prediction_horizon": args.L_out, "temporal_seq_len": args.L_in,
         "num_years": 13, # 假设13年数据
@@ -417,11 +440,12 @@ def main():
                 if val_loss < best_val_loss - args.min_delta:
                     best_val_loss = val_loss
                     patience_counter = 0
-                    checkpoint_path = os.path.join(checkpoint_dir, 'best_model.pth')
-                    # Save the unwrapped model state for DDP
+                    
+                    # --- START MODIFICATION: Save with dynamic name ---
                     model_to_save = model.module if hasattr(model, 'module') else model
-                    torch.save(model_to_save.state_dict(), checkpoint_path)
-                    logging.info(f"🎉 New best model saved to {checkpoint_path} (Val Loss: {val_loss:.6f})")
+                    torch.save(model_to_save.state_dict(), best_model_path)  # <-- 使用新的路径
+                    logging.info(f"🎉 New best model saved to {best_model_path} (Val Loss: {val_loss:.6f})")
+                    # --- END MODIFICATION ---
                 else:
                     patience_counter += 1
                     logging.info(f"No improvement for {patience_counter}/{args.patience} epochs")

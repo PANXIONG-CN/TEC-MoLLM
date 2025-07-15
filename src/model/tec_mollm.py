@@ -83,10 +83,16 @@ class TEC_MoLLM(nn.Module):
         # (B, L, N, C) -> (L, B, N, C) -> (L*B, N, C)
         x_for_gnn = x.permute(1, 0, 2, 3).reshape(-1, N, C_in_with_emb)
 
-        # 3. SpatialEncoder (GATv2) - 现在它处理的是一个批量的图
+        # 3. SpatialEncoder (GATv2) with Residual Connection - 现在它处理的是一个批量的图
         # GATv2Conv内部会自动处理批处理图的邻接关系，只要输入是(Batch_of_graphs * N, C)
         # 我们的输入 (L*B, N, C) 正好符合这个期望，每个时间步的图被正确处理
-        x_spatial = self.spatial_encoder(x_for_gnn, edge_index, edge_weight)
+        x_spatial_processed = self.spatial_encoder(x_for_gnn, edge_index, edge_weight)
+        
+        # --- START MODIFICATION: Add Residual Connection ---
+        # 残差连接：由于已确保GNN输入输出维度一致（22维），可以直接相加
+        # 这能保证原始的时空特征能够"绕过"GNN直接流向后续模块，防止信息损耗
+        x_spatial = x_for_gnn + x_spatial_processed
+        # --- END MODIFICATION ---
 
         # 4. Reshape back for Temporal Processing
         # (L*B, N, C_spatial) -> (L, B, N, C_spatial) -> (B, N, L, C_spatial)
