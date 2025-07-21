@@ -157,13 +157,22 @@ class LLMBackbone(nn.Module):
     """
     An LLM backbone using a pre-trained GPT-2, truncated and adapted with LoRA.
     """
-    def __init__(self, num_layers_to_keep: int = 3):
+    def __init__(self, num_layers_to_keep: int = 3, dropout_rate: float = 0.1):
         super().__init__()
         
-        # Subtask 9.1: Load pre-trained GPT-2 model
-        logging.info("Loading pre-trained GPT-2 model...")
-        self.model = AutoModel.from_pretrained('gpt2')
-        logging.info("GPT-2 model loaded.")
+        # Subtask 9.1: Load pre-trained GPT-2 model with custom dropout configuration
+        logging.info("Loading pre-trained GPT-2 model with custom dropout...")
+        from transformers import GPT2Config, GPT2Model
+        
+        config = GPT2Config.from_pretrained(
+            'gpt2',
+            attn_pdrop=dropout_rate,      # 注意力dropout
+            resid_pdrop=dropout_rate,     # 残差连接dropout  
+            embd_pdrop=dropout_rate,      # 嵌入层dropout
+            local_files_only=False
+        )
+        self.model = GPT2Model.from_pretrained('gpt2', config=config)
+        logging.info("GPT-2 model loaded with custom dropout configuration.")
 
         # Subtask 9.2: Truncate the model
         logging.info(f"Truncating model to keep only the first {num_layers_to_keep} layers.")

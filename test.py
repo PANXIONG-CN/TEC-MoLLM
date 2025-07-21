@@ -85,6 +85,12 @@ def get_tec_mollm_predictions(model, dataloader, device, edge_index, target_scal
     target_scaler = joblib.load(target_scaler_path)
     feature_scaler_path = target_scaler_path.replace('target_scaler.joblib', 'scaler.joblib')
     feature_scaler = joblib.load(feature_scaler_path)
+    
+    # Create a temporary scaler for TEC feature only (for baseline reconstruction)
+    from sklearn.preprocessing import StandardScaler
+    tec_feature_scaler = StandardScaler()
+    tec_feature_scaler.mean_ = np.array([feature_scaler.mean_[0]])  # TEC is the first feature
+    tec_feature_scaler.scale_ = np.array([feature_scaler.scale_[0]])
     # --- END MODIFICATION ---
     
     with torch.no_grad():
@@ -115,9 +121,8 @@ def get_tec_mollm_predictions(model, dataloader, device, edge_index, target_scal
             output_residual_unscaled = inverse_transform_output(output_residual_scaled, target_scaler)
             y_residual_unscaled = inverse_transform_output(y_reshaped, target_scaler)
             
-            # Baseline is from X, so use feature_scaler, only on the first feature (TEC)
-            # We need to extract just the TEC feature for the baseline
-            persistence_baseline_unscaled = inverse_transform_output(persistence_baseline_from_x_scaled, target_scaler)
+            # Baseline is from X, so use the correct TEC feature scaler
+            persistence_baseline_unscaled = inverse_transform_output(persistence_baseline_from_x_scaled, tec_feature_scaler)
             
             # 4. Reconstruct absolute physical values
             # Expand baseline to match the prediction horizon
@@ -128,9 +133,9 @@ def get_tec_mollm_predictions(model, dataloader, device, edge_index, target_scal
             target_absolute_unscaled = persistence_baseline_expanded + y_residual_unscaled
             
             # 5. Re-scale the absolute values to feed into metrics.py
-            # This ensures metrics.py always sees data in the same "target" scale.
-            output_final_scaled = transform_output(output_absolute_unscaled, target_scaler)
-            target_final_scaled = transform_output(target_absolute_unscaled, target_scaler)
+            # Use tec_feature_scaler for absolute values to maintain consistency
+            output_final_scaled = transform_output(output_absolute_unscaled, tec_feature_scaler)
+            target_final_scaled = transform_output(target_absolute_unscaled, tec_feature_scaler)
             
             all_preds.append(output_final_scaled.cpu().numpy())
             all_trues.append(target_final_scaled.cpu().numpy())
@@ -294,6 +299,16 @@ def main():
     logging.info("获取TEC-MoLLM预测结果...")
     y_true, y_pred_mollm = get_tec_mollm_predictions(model, test_loader, device, edge_index, args.target_scaler_path)
     
+    # Create TEC feature scaler for baseline processing (same as used in TEC-MoLLM predictions)
+    target_scaler = joblib.load(args.target_scaler_path)
+    feature_scaler_path = args.target_scaler_path.replace('target_scaler.joblib', 'scaler.joblib')
+    feature_scaler = joblib.load(feature_scaler_path)
+    
+    from sklearn.preprocessing import StandardScaler
+    tec_feature_scaler = StandardScaler()
+    tec_feature_scaler.mean_ = np.array([feature_scaler.mean_[0]])  # TEC is the first feature
+    tec_feature_scaler.scale_ = np.array([feature_scaler.scale_[0]])
+    
     # 基线预测
     logging.info("生成基线预测...")
     y_pred_ha = get_baseline_predictions(test_dataset, args.L_in, args.L_out)
@@ -329,8 +344,8 @@ def main():
     B, H, W, L_out = y_pred_ha_absolute.shape
     y_pred_ha_reshaped = y_pred_ha_absolute.transpose(0, 3, 1, 2).reshape(B, L_out, H*W, 1)
     
-    # Apply target scaler normalization to match TEC-MoLLM prediction format
-    y_pred_ha_scaled = transform_output(torch.from_numpy(y_pred_ha_reshaped).float(), target_scaler).numpy()
+    # Apply TEC feature scaler normalization to match TEC-MoLLM prediction format  
+    y_pred_ha_scaled = transform_output(torch.from_numpy(y_pred_ha_reshaped).float(), tec_feature_scaler).numpy()
     # --- END MODIFICATION ---
     
     # 确保基线预测的样本数与真实值匹配
@@ -339,11 +354,20 @@ def main():
     y_pred_ha_matched = y_pred_ha_scaled[:min_samples]
     
     # --- 评估指标 ---
+    # Save temporary TEC scaler for evaluation
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix='_tec_scaler.joblib') as temp_file:
+        temp_scaler_path = temp_file.name
+        joblib.dump(tec_feature_scaler, temp_scaler_path)
+    
     logging.info("评估TEC-MoLLM模型...")
-    results['TEC-MoLLM'] = evaluate_horizons(y_true_matched, y_pred_mollm[:min_samples], args.target_scaler_path)
+    results['TEC-MoLLM'] = evaluate_horizons(y_true_matched, y_pred_mollm[:min_samples], temp_scaler_path)
     
     logging.info("评估历史平均基线...")
-    results['HistoricalAverage'] = evaluate_horizons(y_true_matched, y_pred_ha_matched, args.target_scaler_path)
+    results['HistoricalAverage'] = evaluate_horizons(y_true_matched, y_pred_ha_matched, temp_scaler_path)
+    
+    # Clean up temporary file
+    os.unlink(temp_scaler_path)
 
     # --- 格式化和保存结果 ---
     results_df = pd.DataFrame(results).T

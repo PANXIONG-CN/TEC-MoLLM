@@ -1,11 +1,15 @@
 #!/bin/bash
 
+# 设置微信推送Token (请替换为您的完整token)
+export WECHAT_BOT_TOKEN="eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjE5MDQyMSwidXVpZCI6IjMyNGQwZTk0LTE0MmMtNDJlZC05Y2U2LTA1ZThiNzc4M2QzMiIsImlzX2FkbWluIjpmYWxzZSwiYmFja3N0YWdlX3JvbGUiOiIiLCJpc19zdXBlcl9hZG1pbiI6ZmFsc2UsInN1Yl9uYW1lIjoiIiwidGVuYW50IjoiYXV0b2RsIiwidXBrIjoiIn0.MaS1BOQtTmip9pitMl-hl9AGO_yc6y7QPItfwoxM-iZNulmE5FsL7LOnjVbdhx8xjIJ4qKCONnE9IzEGVb8qEQ" # 替换成您的完整token
+
 # 定义超参数 (内存优化版本)
 L_IN=48
 STRIDE=12
 LLM_LAYERS=3
 BATCH_SIZE=2
 LR=1e-4
+DROPOUT_RATE=0.2  # 增加正则化
 ACCUMULATION_STEPS=6
 EPOCHS=50
 PATIENCE=20
@@ -31,6 +35,7 @@ torchrun --nproc_per_node=2 train.py \
     --llm_layers $LLM_LAYERS \
     --batch_size $BATCH_SIZE \
     --lr $LR \
+    --dropout_rate $DROPOUT_RATE \
     --accumulation_steps $ACCUMULATION_STEPS \
     --weight_decay 0.01 \
     --epochs $EPOCHS \

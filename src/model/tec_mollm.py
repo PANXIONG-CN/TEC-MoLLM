@@ -45,14 +45,16 @@ class TEC_MoLLM(nn.Module):
             d_llm=model_config['d_llm']
         )
         self.llm_backbone = LLMBackbone(
-            num_layers_to_keep=model_config['llm_layers']
+            num_layers_to_keep=model_config['llm_layers'],
+            dropout_rate=model_config.get('dropout_rate', 0.1)
         )
         # Calculate the actual sequence length after convolutions: 24 -> 12 -> 6 (stride 2, stride 2)
         conv_output_len = model_config['temporal_seq_len'] // (model_config['temporal_strides'][0] * model_config['temporal_strides'][1])
         num_patches = conv_output_len // model_config['patch_len']
         self.prediction_head = PredictionHead(
             input_dim=model_config['d_llm'] * num_patches,
-            output_dim=model_config['prediction_horizon']
+            output_dim=model_config['prediction_horizon'],
+            dropout_rate=model_config.get('dropout_rate', 0.1)
         )
         logging.info("TEC_MoLLM model initialized with all sub-modules.")
 

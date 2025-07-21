@@ -10,6 +10,7 @@ import logging
 import os
 import joblib
 import argparse
+import sys  # 需要在文件顶部导入
 from tqdm import tqdm
 
 from src.data.dataset import SlidingWindowSamplerDataset
@@ -17,6 +18,7 @@ from src.data.dataset import SlidingWindowSamplerDataset
 # from src.features.feature_engineering import create_features_and_targets, standardize_features
 from src.model.tec_mollm import TEC_MoLLM
 from src.evaluation.metrics import evaluate_horizons
+from src.utils.notifications import send_wechat_notification
 
 # Suppress torch.compile backend errors and fallback to eager execution
 torch._dynamo.config.suppress_errors = True
@@ -108,7 +110,8 @@ def cleanup_distributed():
 def train_one_epoch(model, dataloader, optimizer, scheduler, loss_fn, device, edge_index, edge_weight, scaler, rank=0, accumulation_steps=1):
     model.train()
     total_loss = 0
-    progress_bar = tqdm(dataloader, desc="Training") if rank == 0 else dataloader
+    # 修改tqdm的初始化，输出到stdout而不是stderr
+    progress_bar = tqdm(dataloader, desc="Training", disable=(rank!=0), file=sys.stdout) if rank == 0 else dataloader
     
     optimizer.zero_grad()
     
@@ -132,7 +135,17 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, loss_fn, device, ed
             
             output = model(x, time_features, edge_index, edge_weight)
             y_reshaped = y.permute(0, 3, 1, 2).reshape(B, -1, H * W, 1)
-            loss = loss_fn(output, y_reshaped)
+            
+            # --- START MODIFICATION: Label Smoothing ---
+            if model.training:
+                # Only apply noise during training
+                noise = torch.randn_like(y_reshaped) * 0.01  # std=0.01 is a tunable hyperparameter
+                y_final = y_reshaped + noise
+            else:
+                y_final = y_reshaped
+            
+            loss = loss_fn(output, y_final)
+            # --- END MODIFICATION ---
             loss = loss / accumulation_steps
         
         # Scale loss and perform backward pass
@@ -168,6 +181,12 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, loss_fn, device, ed
         # --- END MODIFICATION ---
         
         total_loss += loss.item() * accumulation_steps
+        
+        # 每10%或每100个batch打印一次日志
+        if rank == 0 and (i % (len(dataloader) // 10) == 0 or i == len(dataloader) - 1):
+            current_loss = total_loss / (i + 1)
+            progress_bar.set_postfix_str(f"loss={current_loss:.4f}")
+            logging.info(f"Training progress: [{i+1}/{len(dataloader)}], avg_loss={current_loss:.4f}")
     
     # --- START MODIFICATION for incomplete accumulation at the end ---
     # 处理在循环结束时，梯度已累积但未达到一个完整周期的剩余梯度
@@ -196,11 +215,18 @@ def validate(model, dataloader, loss_fn, device, edge_index, edge_weight, target
     target_scaler = joblib.load(target_scaler_path)
     feature_scaler_path = target_scaler_path.replace('target_scaler.joblib', 'scaler.joblib')
     feature_scaler = joblib.load(feature_scaler_path)
+    
+    # Create a temporary scaler for TEC feature only (for baseline reconstruction)
+    from sklearn.preprocessing import StandardScaler
+    tec_feature_scaler = StandardScaler()
+    tec_feature_scaler.mean_ = np.array([feature_scaler.mean_[0]])  # TEC is the first feature
+    tec_feature_scaler.scale_ = np.array([feature_scaler.scale_[0]])
     # --- END MODIFICATION ---
     
     with torch.no_grad():
-        progress_bar = tqdm(dataloader, desc="Validating") if rank == 0 else dataloader
-        for batch in progress_bar:
+        # 修改tqdm的初始化，输出到stdout而不是stderr
+        progress_bar = tqdm(dataloader, desc="Validating", disable=(rank!=0), file=sys.stdout) if rank == 0 else dataloader
+        for i, batch in enumerate(progress_bar):
             x = batch['x'].to(device)
             y_residual_scaled = batch['y'].to(device)
             time_features = batch['x_time_features'].to(device)
@@ -225,9 +251,8 @@ def validate(model, dataloader, loss_fn, device, edge_index, edge_weight, target
             output_residual_unscaled = inverse_transform_output(output_residual_scaled, target_scaler)
             y_residual_unscaled = inverse_transform_output(y_reshaped, target_scaler)
             
-            # Baseline is from X, so use feature_scaler, only on the first feature (TEC)
-            # We need to extract just the TEC feature for the baseline
-            persistence_baseline_unscaled = inverse_transform_output(persistence_baseline_from_x_scaled, target_scaler)
+            # Baseline is from X, so use the correct TEC feature scaler
+            persistence_baseline_unscaled = inverse_transform_output(persistence_baseline_from_x_scaled, tec_feature_scaler)
             
             # 4. Reconstruct absolute physical values
             # Expand baseline to match the prediction horizon
@@ -238,15 +263,21 @@ def validate(model, dataloader, loss_fn, device, edge_index, edge_weight, target
             target_absolute_unscaled = persistence_baseline_expanded + y_residual_unscaled
             
             # 5. Re-scale the absolute values to feed into metrics.py
-            # This ensures metrics.py always sees data in the same "target" scale.
-            output_final_scaled = transform_output(output_absolute_unscaled, target_scaler)
-            target_final_scaled = transform_output(target_absolute_unscaled, target_scaler)
+            # Use tec_feature_scaler for absolute values to maintain consistency
+            output_final_scaled = transform_output(output_absolute_unscaled, tec_feature_scaler)
+            target_final_scaled = transform_output(target_absolute_unscaled, tec_feature_scaler)
             
             all_preds.append(output_final_scaled.cpu().numpy())
             all_trues.append(target_final_scaled.cpu().numpy())
             # --- END MODIFICATION ---
             
             total_loss += loss.item()
+            
+            # 每10%或每100个batch打印一次日志
+            if rank == 0 and (i % (len(dataloader) // 10) == 0 or i == len(dataloader) - 1):
+                current_loss = total_loss / (i + 1)
+                progress_bar.set_postfix_str(f"val_loss={current_loss:.4f}")
+                logging.info(f"Validation progress: [{i+1}/{len(dataloader)}], avg_val_loss={current_loss:.4f}")
             
             # 立即清理GPU内存
             del x, y_residual_scaled, time_features, output_residual_scaled, y_reshaped
@@ -258,8 +289,17 @@ def validate(model, dataloader, loss_fn, device, edge_index, edge_weight, target
     y_true_scaled = np.concatenate(all_trues, axis=0)
     y_pred_scaled = np.concatenate(all_preds, axis=0)
     
-    # 调用新的评估函数，传入scaler路径进行逆变换
-    metrics = evaluate_horizons(y_true_scaled, y_pred_scaled, target_scaler_path)
+    # 调用新的评估函数，传入tec_feature_scaler路径进行逆变换
+    # Save temporary TEC scaler for evaluation
+    import tempfile
+    with tempfile.NamedTemporaryFile(delete=False, suffix='_tec_scaler.joblib') as temp_file:
+        temp_scaler_path = temp_file.name
+        joblib.dump(tec_feature_scaler, temp_scaler_path)
+    
+    metrics = evaluate_horizons(y_true_scaled, y_pred_scaled, temp_scaler_path)
+    
+    # Clean up temporary file
+    os.unlink(temp_scaler_path)
     return avg_loss, metrics
 
 def parse_args():
@@ -289,6 +329,7 @@ def parse_args():
     # Model configuration
     parser.add_argument('--d_emb', type=int, default=16, help='Embedding dimension')
     parser.add_argument('--llm_layers', type=int, default=3, help='Number of LLM layers')
+    parser.add_argument('--dropout_rate', type=float, default=0.2, help='Dropout rate for LLM and prediction head.')
     
     return parser.parse_args()
 
@@ -361,6 +402,7 @@ def main():
         "temporal_strides": [2, 2], "patch_len": patch_len, "d_llm": 768, "llm_layers": args.llm_layers,
         "prediction_horizon": args.L_out, "temporal_seq_len": args.L_in,
         "num_years": 13, # 假设13年数据
+        "dropout_rate": args.dropout_rate, # 将参数传入配置
     }
     
     # --- Data Loading and Processing (Simplified) ---
@@ -468,7 +510,18 @@ def main():
     
     # --- Training Loop ---
     best_val_loss = float('inf')
+    best_metrics = {}  # 保存最佳指标
     patience_counter = 0
+    
+    # 发送训练开始通知
+    if rank == 0:
+        start_title = f"🚀 训练开始: {run_name}"
+        start_content = (
+            f"配置: L_in={args.L_in}, stride={args.train_stride}, batch_size={args.batch_size}\n"
+            f"学习率: {args.lr}, LLM层数: {args.llm_layers}, Dropout: {args.dropout_rate}\n"
+            f"总Epochs: {args.epochs}, 早停耐心: {args.patience}"
+        )
+        send_wechat_notification(start_title, start_content)
     
     try:
         for epoch in range(args.epochs):
@@ -533,13 +586,30 @@ def main():
                 
                 # Early stopping and model saving logic
                 if val_loss < best_val_loss - args.min_delta:
+                    previous_best_loss = best_val_loss  # 记录之前的最佳损失
                     best_val_loss = val_loss
+                    best_metrics = val_metrics  # 保存最佳指标
                     patience_counter = 0
                     
                     # --- START MODIFICATION: Save with dynamic name ---
                     model_to_save = model.module if hasattr(model, 'module') else model
                     torch.save(model_to_save.state_dict(), best_model_path)  # <-- 使用新的路径
                     logging.info(f"🎉 New best model saved to {best_model_path} (Val Loss: {val_loss:.6f})")
+                    
+                    # --- 发送微信通知 ---
+                    notification_title = f"🚀 新最佳模型: {run_name}"
+                    if epoch == 0:
+                        notification_content = (
+                            f"Epoch {epoch+1}: 首个模型 Val Loss: {best_val_loss:.4f}\n"
+                            f"Val R²: {val_metrics['r2_score_avg']:.4f}, PearsonR: {val_metrics['pearson_r_avg']:.4f}"
+                        )
+                    else:
+                        notification_content = (
+                            f"Epoch {epoch+1}: Val Loss从 {previous_best_loss:.4f} -> {best_val_loss:.4f}\n"
+                            f"Val R²: {val_metrics['r2_score_avg']:.4f}, PearsonR: {val_metrics['pearson_r_avg']:.4f}"
+                        )
+                    send_wechat_notification(notification_title, notification_content)
+                    # ---
                     # --- END MODIFICATION ---
                 else:
                     patience_counter += 1
@@ -549,7 +619,31 @@ def main():
                 if patience_counter >= args.patience:
                     logging.info(f"🛑 Early stopping triggered after {epoch+1} epochs (patience: {args.patience})")
                     logging.info(f"Best validation loss: {best_val_loss:.6f}")
+                    
+                    # 早停触发时发送通知
+                    stopping_title = f"🛑 早停触发: {run_name}"
+                    stopping_content = f"在Epoch {epoch+1}触发早停，连续{args.patience}轮无提升。"
+                    send_wechat_notification(stopping_title, stopping_content)
                     break
+        
+        # 在循环结束后，无论是否早停，都发送一个最终通知
+        if rank == 0:
+            final_title = f"✅ 训练完成: {run_name}"
+            final_content = (
+                f"总Epochs: {epoch+1}/{args.epochs}\n"
+                f"最佳Val Loss: {best_val_loss:.4f}\n"
+                f"对应R²: {best_metrics.get('r2_score_avg', 0):.4f}, PearsonR: {best_metrics.get('pearson_r_avg', 0):.4f}"
+            )
+            send_wechat_notification(final_title, final_content)
+
+    except Exception as e:
+        # 发生错误时发送通知
+        if rank == 0:
+            error_title = f"❌ 训练失败: {run_name}"
+            error_content = f"错误信息: {e}"
+            send_wechat_notification(error_title, error_content)
+        # 重新抛出异常
+        raise e
     
     finally:
         cleanup_distributed()

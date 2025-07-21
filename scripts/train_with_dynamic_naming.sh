@@ -1,12 +1,16 @@
 #!/bin/bash
 
-# 定义超参数
+# 设置微信推送Token (请替换为您的完整token)
+export WECHAT_BOT_TOKEN="eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjE5MDQyMSwidXVpZCI6IjMyNGQwZTk0LTE0MmMtNDJlZC05Y2U2LTA1ZThiNzc4M2QzMiIsImlzX2FkbWluIjpmYWxzZSwiYmFja3N0YWdlX3JvbGUiOiIiLCJpc19zdXBlcl9hZG1pbiI6ZmFsc2UsInN1Yl9uYW1lIjoiIiwidGVuYW50IjoiYXV0b2RsIiwidXBrIjoiIn0.MaS1BOQtTmip9pitMl-hl9AGO_yc6y7QPItfwoxM-iZNulmE5FsL7LOnjVbdhx8xjIJ4qKCONnE9IzEGVb8qEQ" # 替换成您的完整token
+
+# 定义超参数 (新实验配置 - V8.0)
 L_IN=336
-STRIDE=3       # 或者从6开始
-LLM_LAYERS=6   # 或者从3开始
-BATCH_SIZE=8   # 或者根据显存调整
-LR=5e-5        # 一个更安全的起点
-ACCUMULATION_STEPS=1 # 如果BATCH_SIZE已经够大，可以不用累积
+STRIDE=3       # 保持不变
+LLM_LAYERS=9   # 增加容量
+BATCH_SIZE=4   # 或者根据显存调整
+LR=5e-5        # 保持不变
+DROPOUT_RATE=0.2  # 增加正则化
+ACCUMULATION_STEPS=2 # 如果BATCH_SIZE已经够大，可以不用累积
 EPOCHS=50
 PATIENCE=15
 
@@ -27,6 +31,7 @@ torchrun --nproc_per_node=4 train.py \
     --llm_layers $LLM_LAYERS \
     --batch_size $BATCH_SIZE \
     --lr $LR \
+    --dropout_rate $DROPOUT_RATE \
     --accumulation_steps $ACCUMULATION_STEPS \
     --weight_decay 0.01 \
     --epochs $EPOCHS \
