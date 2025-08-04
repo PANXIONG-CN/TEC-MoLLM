@@ -42,6 +42,9 @@ results/
 logs/
 plans/
 
+# WandB
+wandb/
+
 # Data files (optional - comment out if you want to track data)
 data/raw/*.hdf5
 data/processed/*.pt
