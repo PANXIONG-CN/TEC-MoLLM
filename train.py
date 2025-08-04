@@ -304,15 +304,31 @@ def main(args):
     scaler = torch.cuda.amp.GradScaler()
 
     best_val_loss = float("inf")
+    best_val_metrics = None  # 保存最佳模型的所有指标
+    best_epoch = 0
     patience_counter = 0
 
     if is_main_process():
-        send_wechat_notification(f"🚀 训练开始: {args.run_name}", f"Epochs: {args.epochs}, LR: {args.lr}")
+        # 增强训练开始消息
+        start_msg = (
+            f"🚀🚀🚀 TEC-MoLLM 训练开始 🚀🚀🚀\n"
+            f"▶️ RUN_NAME: {args.run_name}\n"
+            f"📊 配置信息:\n"
+            f"  • 总Epochs: {args.epochs}\n"
+            f"  • 学习率: {args.lr}\n"
+            f"  • 批次大小: {args.batch_size}\n"
+            f"  • LLM层数: {args.llm_layers}\n"
+            f"  • 有效批次大小: {args.batch_size * args.accumulation_steps * get_world_size()}\n"
+            f"  • GPU数量: {get_world_size()}"
+        )
+        send_wechat_notification("🚀 TEC-MoLLM 训练启动", start_msg)
 
     for epoch in range(args.epochs):
         model.train()
         train_sampler.set_epoch(epoch)
         train_loss = 0.0
+        train_mse_sum = 0.0  # 用于计算训练RMSE
+        train_samples_count = 0
         optimizer.zero_grad()
         log_interval = max(1, len(train_loader) // 5)
 
@@ -332,6 +348,13 @@ def main(args):
                 y_reshaped = y.permute(0, 3, 1, 2).reshape(B, -1, H * W, 1)
                 loss = criterion(output, y_reshaped)
                 loss = loss / args.accumulation_steps
+
+                # 计算MSE用于训练RMSE（不参与反向传播）
+                with torch.no_grad():
+                    mse_batch = torch.mean((output - y_reshaped) ** 2).item()
+                    train_mse_sum += mse_batch
+                    train_samples_count += 1
+
             scaler.scale(loss).backward()
             train_loss += loss.item() * args.accumulation_steps
             if (i + 1) % args.accumulation_steps == 0:
@@ -348,26 +371,53 @@ def main(args):
 
         if is_main_process():
             avg_epoch_train_loss = train_loss / len(train_loader)
-            logging.info(f"--- Epoch {epoch+1} Summary ---")
-            logging.info(f"Train Loss: {avg_epoch_train_loss:.4f} | Val Loss: {val_loss:.4f}")
+            # 计算训练RMSE
+            avg_train_mse = train_mse_sum / train_samples_count if train_samples_count > 0 else 0.0
+            train_rmse = np.sqrt(avg_train_mse)
 
-            log_data = {"epoch": epoch + 1, "train_loss": avg_epoch_train_loss, "val_loss": val_loss}
+            logging.info(f"--- Epoch {epoch+1} Summary ---")
+            logging.info(f"Train Loss: {avg_epoch_train_loss:.4f} | Val Loss: {val_loss:.4f} | Train RMSE: {train_rmse:.4f}")
+
+            log_data = {"epoch": epoch + 1, "train_loss": avg_epoch_train_loss, "val_loss": val_loss, "train_rmse": train_rmse}
+
+            # 准备微信消息的指标
+            val_rmse = val_metrics.get("rmse_avg", 0.0) if val_metrics else 0.0
+
             if val_metrics:
                 logging.info(
-                    f"Val MAE: {val_metrics['mae_avg']:.4f} | Val R²: {val_metrics['r2_score_avg']:.4f} | Pearson R: {val_metrics['pearson_r_avg']:.4f}"
+                    f"Val MAE: {val_metrics['mae_avg']:.4f} | Val RMSE: {val_metrics['rmse_avg']:.4f} | Val R²: {val_metrics['r2_score_avg']:.4f} | Pearson R: {val_metrics['pearson_r_avg']:.4f}"
                 )
                 log_data.update(
                     {
                         "val_mae_avg": val_metrics["mae_avg"],
+                        "val_rmse_avg": val_metrics["rmse_avg"],
                         "val_r2_avg": val_metrics["r2_score_avg"],
                         "val_pearson_avg": val_metrics["pearson_r_avg"],
                     }
                 )
+
+            # 发送每个epoch的详细微信消息
+            epoch_msg = (
+                f"📊 Epoch {epoch+1}/{args.epochs} 完成\n"
+                f"🎯 RUN: {args.run_name}\n"
+                f"📈 指标汇总:\n"
+                f"  • Train Loss: {avg_epoch_train_loss:.4f}\n"
+                f"  • Val Loss: {val_loss:.4f}\n"
+                f"  • Train RMSE: {train_rmse:.4f}\n"
+                f"  • Val RMSE: {val_rmse:.4f}"
+            )
+            if val_metrics:
+                epoch_msg += f"\n  • Val R²: {val_metrics['r2_score_avg']:.4f}"
+
+            send_wechat_notification(f"📊 Epoch {epoch+1} 报告", epoch_msg)
+
             if wandb.run:
                 wandb.log(log_data)
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
+                best_val_metrics = val_metrics  # 保存最佳模型的指标
+                best_epoch = epoch + 1
                 patience_counter = 0
                 checkpoint_path = f"checkpoints/best_model_{args.run_name}.pth"
                 torch.save(model.module.state_dict(), checkpoint_path)
@@ -389,10 +439,18 @@ def main(args):
                     # artifact.add_file() is NOT called, so the file is not uploaded.
                     wandb.log_artifact(model_artifact, aliases=["best", f"epoch-{epoch+1}"])
 
-                send_wechat_notification(
-                    f"🎉 新最佳模型: {args.run_name}",
-                    f"Epoch {epoch+1}, Val Loss: {val_loss:.4f}, R2: {val_metrics.get('r2_score_avg', 'N/A') if val_metrics else 'N/A':.4f}",
+                # 增强最佳模型保存消息
+                best_msg = (
+                    f"🎉🎉🎉 发现新最佳模型！\n"
+                    f"🎯 RUN: {args.run_name}\n"
+                    f"🏆 Epoch {epoch+1} 成绩:\n"
+                    f"  • Val Loss: {val_loss:.4f} (⬇️ 新低!)\n"
+                    f"  • Val RMSE: {val_metrics.get('rmse_avg', 0.0):.4f}\n"
+                    f"  • Val R²: {val_metrics.get('r2_score_avg', 0.0):.4f}\n"
+                    f"  • Val Pearson R: {val_metrics.get('pearson_r_avg', 0.0):.4f}\n"
+                    f"💾 模型已保存到: {checkpoint_path}"
                 )
+                send_wechat_notification("🎉 新最佳模型发现!", best_msg)
             else:
                 patience_counter += 1
                 if patience_counter >= args.patience:
@@ -402,7 +460,24 @@ def main(args):
     if is_main_process():
         if wandb.run:
             wandb.finish()
-        send_wechat_notification(f"✅ 训练结束: {args.run_name}", f"Best Val Loss: {best_val_loss:.4f}")
+
+        # 增强训练结束消息
+        if best_val_metrics:
+            final_msg = (
+                f"✅✅✅ TEC-MoLLM 训练完成！\n"
+                f"🎯 RUN: {args.run_name}\n"
+                f"🏆 最佳模型 (Epoch {best_epoch}):\n"
+                f"  • Best Val Loss: {best_val_loss:.4f}\n"
+                f"  • Best Val RMSE: {best_val_metrics['rmse_avg']:.4f}\n"
+                f"  • Best Val MAE: {best_val_metrics['mae_avg']:.4f}\n"
+                f"  • Best Val R²: {best_val_metrics['r2_score_avg']:.4f}\n"
+                f"  • Best Pearson R: {best_val_metrics['pearson_r_avg']:.4f}\n"
+                f"🎉 训练成功完成！模型已保存"
+            )
+        else:
+            final_msg = f"✅ TEC-MoLLM 训练完成\n" f"🎯 RUN: {args.run_name}\n" f"🏆 Best Val Loss: {best_val_loss:.4f}"
+
+        send_wechat_notification("✅ 训练完成", final_msg)
     cleanup_ddp()
 
 
