@@ -315,6 +315,7 @@ def main(args):
             f"▶️ RUN_NAME: {args.run_name}\n"
             f"📊 配置信息:\n"
             f"  • 总Epochs: {args.epochs}\n"
+            f"  • 早停耐心值: {args.patience} (连续{args.patience}个epoch无提升将停止)\n"
             f"  • 学习率: {args.lr}\n"
             f"  • 批次大小: {args.batch_size}\n"
             f"  • LLM层数: {args.llm_layers}\n"
@@ -455,6 +456,16 @@ def main(args):
                 patience_counter += 1
                 if patience_counter >= args.patience:
                     logging.info("Early stopping triggered.")
+                    if is_main_process():
+                        early_stop_msg = (
+                            f"⏹️ 早停机制触发！\n"
+                            f"🎯 RUN: {args.run_name}\n"
+                            f"📊 连续{args.patience}个epoch验证指标无提升\n"
+                            f"🏆 最佳模型在Epoch {best_epoch}:\n"
+                            f"  • Best Val Loss: {best_val_loss:.4f}\n"
+                            f"🛑 训练提前结束，使用已保存的最佳模型"
+                        )
+                        send_wechat_notification("⏹️ 训练早停", early_stop_msg)
                     break
 
     if is_main_process():
@@ -462,10 +473,13 @@ def main(args):
             wandb.finish()
 
         # 增强训练结束消息
+        training_reason = "⏹️ 早停触发" if patience_counter >= args.patience else f"✅ 完成{args.epochs}个epochs"
         if best_val_metrics:
             final_msg = (
                 f"✅✅✅ TEC-MoLLM 训练完成！\n"
                 f"🎯 RUN: {args.run_name}\n"
+                f"📊 结束原因: {training_reason}\n"
+                f"⏱️ Patience设置: {args.patience} (连续无提升epoch数)\n"
                 f"🏆 最佳模型 (Epoch {best_epoch}):\n"
                 f"  • Best Val Loss: {best_val_loss:.4f}\n"
                 f"  • Best Val RMSE: {best_val_metrics['rmse_avg']:.4f}\n"
@@ -475,7 +489,13 @@ def main(args):
                 f"🎉 训练成功完成！模型已保存"
             )
         else:
-            final_msg = f"✅ TEC-MoLLM 训练完成\n" f"🎯 RUN: {args.run_name}\n" f"🏆 Best Val Loss: {best_val_loss:.4f}"
+            final_msg = (
+                f"✅ TEC-MoLLM 训练完成\n"
+                f"🎯 RUN: {args.run_name}\n"
+                f"📊 结束原因: {training_reason}\n"
+                f"⏱️ Patience设置: {args.patience}\n"
+                f"🏆 Best Val Loss: {best_val_loss:.4f}"
+            )
 
         send_wechat_notification("✅ 训练完成", final_msg)
     cleanup_ddp()
