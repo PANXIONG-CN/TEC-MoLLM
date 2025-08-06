@@ -1,7 +1,10 @@
 #!/bin/bash
 
-# 设置微信推送Token (请替换为您的完整token)
-export WECHAT_BOT_TOKEN="eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjE5MDQyMSwidXVpZCI6IjMyNGQwZTk0LTE0MmMtNDJlZC05Y2U2LTA1ZThiNzc4M2QzMiIsImlzX2FkbWluIjpmYWxzZSwiYmFja3N0YWdlX3JvbGUiOiIiLCJpc19zdXBlcl9hZG1pbiI6ZmFsc2UsInN1Yl9uYW1lIjoiIiwidGVuYW50IjoiYXV0b2RsIiwidXBrIjoiIn0.MaS1BOQtTmip9pitMl-hl9AGO_yc6y7QPItfwoxM-iZNulmE5FsL7LOnjVbdhx8xjIJ4qKCONnE9IzEGVb8qEQ" # 替换成您的完整token
+# ServerChan 微信推送配置
+#    已在代码中集成 ServerChan 推送，无需额外环境变量配置
+#    SendKey: SCT291707Tq6qEBYkKMcRIdczO5LM6Qp1U
+echo "✅ ServerChan 微信推送已配置完成"
+echo "   训练过程中会自动发送微信通知"
 
 # 定义超参数 (新实验配置 - V8.0)
 L_IN=336
