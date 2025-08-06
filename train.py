@@ -397,6 +397,12 @@ def main(args):
                     }
                 )
 
+            # 先计算patience状态用于显示
+            current_patience_counter = patience_counter
+            is_best_model = val_loss < best_val_loss
+            if not is_best_model:
+                current_patience_counter += 1
+
             # 发送每个epoch的详细微信消息
             epoch_msg = (
                 f"📊 Epoch {epoch+1}/{args.epochs} 完成\n"
@@ -409,6 +415,12 @@ def main(args):
             )
             if val_metrics:
                 epoch_msg += f"\n  • Val R²: {val_metrics['r2_score_avg']:.4f}"
+            
+            # 添加patience信息
+            if is_best_model:
+                epoch_msg += f"\n🎉 新最佳模型! 重置早停计数器"
+            else:
+                epoch_msg += f"\n⏱️ 早停监控: {current_patience_counter}/{args.patience} (连续无提升epochs)"
 
             send_wechat_notification(f"📊 Epoch {epoch+1} 报告", epoch_msg)
 
