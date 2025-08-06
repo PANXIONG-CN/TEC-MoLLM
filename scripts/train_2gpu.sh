@@ -1,10 +1,8 @@
 #!/bin/bash
 
-# 设置微信推送Token (请替换为您的完整token)
-
 #!/bin/bash
 
-# --- WandB & 通知配置 ---
+# --- WandB & 微信推送配置 ---
 # 1. WandB API Key (推荐)
 #    请确保已设置此环境变量。如果没有，脚本会发出警告。
 #    您可以在 shell 中执行: export WANDB_API_KEY="YOUR_KEY_HERE"
@@ -16,13 +14,14 @@ if [ -z "$WANDB_API_KEY" ]; then
 fi
 
 # 2. WandB 项目和实体（用户名/团队名）
-
 export WANDB_PROJECT="TEC-MoLLM-Project"
 export WANDB_ENTITY="xiongpan-tsinghua-university" 
 
-# 3. 微信通知Token
-#    重要：请确保这是从AutoDL官网复制的完整、无省略号的Token
-export WECHAT_BOT_TOKEN="eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjE5MDQyMSwidXVpZCI6IjMyNGQwZTk0LTE0MmMtNDJlZC05Y2U2LTA1ZThiNzc4M2QzMiIsImlzX2FkbWluIjpmYWxzZSwiYmFja3N0YWdlX3JvbGUiOiIiLCJpc19zdXBlcl9hZG1pbiI6ZmFsc2UsInN1Yl9uYW1lIjoiIiwidGVuYW50IjoiYXV0b2RsIiwidXBrIjoiIn0.MaS1BOQtTmip9pitMl-hl9AGO_yc6y7QPItfwoxM-iZNulmE5FsL7LOnjVbdhx8xjIJ4qKCONnE9IzEGVb8qEQ" # 替换成您的完整token
+# 3. ServerChan 微信推送配置
+#    已在代码中集成 ServerChan 推送，无需额外环境变量配置
+#    SendKey: SCT291707Tq6qEBYkKMcRIdczO5LM6Qp1U
+echo "✅ ServerChan 微信推送已配置完成"
+echo "   训练过程中会自动发送微信通知"
 
 # 定义超参数
 L_IN=48
