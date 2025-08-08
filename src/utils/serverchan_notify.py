@@ -16,8 +16,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # ServerChan 配置
-SERVERCHAN_SENDKEY = "SCT291707Tq6qEBYkKMcRIdczO5LM6Qp1U"  # 您提供的SendKey
-SERVERCHAN_URL = f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send"
+# 从环境变量读取 SendKey，避免硬编码
+SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY")
+SERVERCHAN_URL = (
+    f"https://sctapi.ftqq.com/{SERVERCHAN_SENDKEY}.send" if SERVERCHAN_SENDKEY else None
+)
 
 
 def format_content_for_serverchan(content):
@@ -130,8 +133,11 @@ def test_serverchan():
 
 如果您收到这条消息，说明 ServerChan 推送配置成功！"""
 
-    print(f"正在测试 ServerChan 推送...")
-    print(f"SendKey: {SERVERCHAN_SENDKEY[:10]}...{SERVERCHAN_SENDKEY[-4:]}")
+    print("正在测试 ServerChan 推送...")
+    if SERVERCHAN_SENDKEY:
+        print(f"SendKey: {SERVERCHAN_SENDKEY[:10]}...{SERVERCHAN_SENDKEY[-4:]}")
+    else:
+        print("SendKey 未配置")
 
     if send_serverchan_notification(test_title, test_content):
         print("✅ ServerChan 推送测试成功！请检查微信消息。")
@@ -143,8 +149,7 @@ def test_serverchan():
 
 if __name__ == "__main__":
     # 运行测试
-    if not SERVERCHAN_SENDKEY or SERVERCHAN_SENDKEY == "your_sendkey_here":
-        print("⚠️ 请配置正确的 ServerChan SendKey")
-        print("在代码中修改 SERVERCHAN_SENDKEY 变量")
+    if not SERVERCHAN_SENDKEY:
+        print("⚠️ 请设置环境变量 SERVERCHAN_SENDKEY")
     else:
         test_serverchan()
