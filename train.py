@@ -415,7 +415,7 @@ def main(args):
             )
             if val_metrics:
                 epoch_msg += f"\n  • Val R²: {val_metrics['r2_score_avg']:.4f}"
-            
+
             # 添加patience信息
             if is_best_model:
                 epoch_msg += f"\n🎉 新最佳模型! 重置早停计数器"
